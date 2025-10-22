@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (635x215, LAYOUT 2 COLUNAS, CAMPOS COMPLETOS) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (635x215, LAYOUT 2 COLUNAS, CAMPOS PT/EN) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,11 +9,8 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BUILD_VERSION = '2025-10-22-r4';
+const BUILD_VERSION = '2025-10-22-r5';
 
-/* =========================
-   C O R S   R E S T R I T O
-   ========================= */
 const corsOptions = {
   origin: 'https://octopushelpdesk.com.br',
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -26,10 +23,7 @@ app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-/* ============================================
-   H E L P E R S
-   ============================================ */
-
+// Helpers
 const streamToBuffer = (stream) =>
   new Promise((resolve, reject) => {
     const chunks = [];
@@ -49,7 +43,8 @@ function drawContain(ctx, img, boxX, boxY, boxW, boxH) {
 
 function drawTextWrap(ctx, text, x, y, maxWidth, lineHeight) {
   if (!text) return y;
-  const words = String(text).split(/\s+/);
+  const words = String(text).trim().split(/\s+/);
+  if (!words.length) return y;
   let line = '';
   for (let n = 0; n < words.length; n++) {
     const test = line ? `${line} ${words[n]}` : words[n];
@@ -65,44 +60,62 @@ function drawTextWrap(ctx, text, x, y, maxWidth, lineHeight) {
   return y;
 }
 
-/* ============================================
-   G E R A Ç Ã O   D E   G I F
-   ============================================ */
+// Normaliza campos PT/EN
+function pick(obj, keys) {
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null && String(obj[k]).trim() !== '') {
+      return String(obj[k]).trim();
+    }
+  }
+  return '';
+}
 
 const handleGifGeneration = async (req, res, isTrilha = false) => {
-  const {
-    name,           // Nome
-    department,     // Departamento
-    title,          // Cargo
-    phone,          // Telefone
-    email,          // (opcional)
-    address,        // Endereço (opcional)
-    gifUrl,
-    qrCodeData,     // obrigatório na Trilha
-    outWidth,
-    outHeight
-  } = req.body;
+  const body = req.body || {};
+
+  const name       = pick(body, ['name', 'nome']);
+  const department = pick(body, ['department', 'departamento']);
+  const title      = pick(body, ['title', 'cargo', 'role']);
+  const phone      = pick(body, ['phone', 'telefone', 'tel']);
+  const email      = pick(body, ['email', 'e-mail']);
+  const address    = pick(body, ['address', 'endereco', 'endereço']);
+  const gifUrl     = pick(body, ['gifUrl', 'gif_url', 'gif']);
+  const qrCodeData = body.qrCodeData;
+
+  const outW = Number(body.outWidth)  || 635;
+  const outH = Number(body.outHeight) || 215;
+
+  // Logs de debug curtos (pra ver se chegou)
+  const short = (s) => (s ? s.slice(0, 60) : s);
+  console.log('[REQ]', {
+    build: BUILD_VERSION,
+    trilha: isTrilha,
+    out: `${outW}x${outH}`,
+    name: short(name),
+    department: short(department),
+    title: short(title),
+    phone: short(phone),
+    email: short(email),
+    address: short(address),
+    gifUrl: short(gifUrl)
+  });
 
   if (!gifUrl || !name || !title || !phone) {
-    return res.status(400).send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
+    return res
+      .status(400)
+      .send('Erro: informe ao menos nome, cargo (title/cargo), telefone (phone/telefone) e gifUrl.');
   }
   if (isTrilha && !qrCodeData) {
     return res.status(400).send('Erro: QR Code é obrigatório para a assinatura da Trilha.');
   }
 
-  // tamanho final (padrão solicitado 635x215)
-  const outW = Number(outWidth)  || 635;
-  const outH = Number(outHeight) || 215;
-
   try {
-    console.log(`[ASSINATURA] ${BUILD_VERSION} | ${isTrilha ? 'Trilha' : 'Outras'} | ${name} | ${outW}x${outH}`);
-
     // 1) Baixa GIF
     const gifResp = await fetch(gifUrl);
     if (!gifResp.ok) throw new Error(`Falha ao buscar GIF (${gifResp.status} ${gifResp.statusText})`);
     const gifBuffer = await gifResp.buffer();
 
-    // 2) Frames como PNG
+    // 2) Frames PNG
     const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
 
@@ -119,18 +132,14 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
 
     // 4) QR (Trilha)
     let qrImage = null;
-    if (isTrilha) {
-      try {
-        qrImage = await loadImage(qrCodeData);
-      } catch {
-        throw new Error('Falha ao carregar QR Code (qrCodeData inválido?).');
-      }
+    if (isTrilha && qrCodeData) {
+      qrImage = await loadImage(qrCodeData);
     }
 
-    // 5) Layout base
+    // Layout base
     const padding = 16;
-    const leftColW = 220;       // coluna do GIF
-    const dividerX = leftColW;  // posição da divisória azul
+    const leftColW = 220;        // coluna do GIF
+    const dividerX = leftColW;   // divisória azul
     const textLeft = dividerX + 12;
     const textAreaRightBase = outW - padding;
 
@@ -146,14 +155,14 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, outW, outH);
 
-      // GIF à esquerda
+      // GIF à esquerda (contido)
       drawContain(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
       // Divisor azul
       ctx.fillStyle = '#1C4C9A';
       ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
 
-      // QR (Trilha)
+      // QR à direita (Trilha)
       let textAreaRight = textAreaRightBase;
       if (isTrilha && qrImage) {
         const qrSize = Math.min(110, outH - padding * 2);
@@ -166,14 +175,14 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       }
 
       // Área de texto
-      const textMaxWidth = textAreaRight - textLeft;
+      const textMaxWidth = Math.max(40, textAreaRight - textLeft);
 
       // Paleta
-      const nameColor    = isTrilha ? '#0E2923' : '#0E2B66';
-      const normalColor  = isTrilha ? '#0E2923' : '#2E3A4A';
-      const subtleColor  = '#6A7280';
+      const nameColor   = isTrilha ? '#0E2923' : '#0E2B66';
+      const normalColor = isTrilha ? '#0E2923' : '#2E3A4A';
+      const subtleColor = '#6A7280';
 
-      // Tamanhos para 215px de altura
+      // Tamanhos (ajustados para 215px)
       const nameSize  = 22;
       const subSize   = 16;
       const lineH     = 20;
@@ -188,7 +197,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.font = `bold ${nameSize}px sans-serif`;
       y = drawTextWrap(ctx, name, textLeft, y, textMaxWidth, lineH) + 6;
 
-      // Departamento
+      // Departamento (se vier)
       if (department) {
         ctx.fillStyle = normalColor;
         ctx.font = `${subSize}px sans-serif`;
@@ -204,14 +213,14 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.font = `bold ${subSize}px sans-serif`;
       y = drawTextWrap(ctx, phone, textLeft, y + 2, textMaxWidth, lineH);
 
-      // Email (opcional)
+      // Email (se vier)
       if (email) {
         ctx.fillStyle = normalColor;
         ctx.font = `${subSize}px sans-serif`;
         y = drawTextWrap(ctx, email, textLeft, y + 2, textMaxWidth, lineH);
       }
 
-      // Endereço (opcional)
+      // Endereço (se vier)
       if (address) {
         ctx.fillStyle = subtleColor;
         ctx.font = `${smallSize}px sans-serif`;
@@ -226,26 +235,19 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
   } catch (error) {
     console.error('[ASSINATURA] ERRO:', error);
     if (!res.headersSent) {
-      res.status(500).send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
+      res.status(500).send(`Erro interno ao processar o GIF. Detalhe: ${error.message}`);
     } else {
       console.error('Erro após início do stream; resposta pode estar incompleta.');
     }
   }
 };
 
-/* ============================================
-   R O T A S
-   ============================================ */
-
-app.post('/generate-gif-signature', (req, res) => handleGifGeneration(req, res, false)); // outras empresas
-app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, res, true)); // trilha (com QR)
-
+// Rotas
+app.post('/generate-gif-signature', (req, res) => handleGifGeneration(req, res, false));
+app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, res, true));
 app.get('/version', (_req, res) => res.json({ version: BUILD_VERSION }));
 app.get('/', (_req, res) => res.send(`Servidor no ar! build=${BUILD_VERSION}`));
 
-/* ============================================
-   S T A R T
-   ============================================ */
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT} | build=${BUILD_VERSION}`);
 });
