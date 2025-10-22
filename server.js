@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - VERSÃO ESTÁVEL) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - CORREÇÃO LAYOUT) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -79,6 +79,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     const firstImg = await loadImage(firstBuf);
     const width = firstImg.width;
     const height = firstImg.height;
+    console.log(`[ASSINATURA] Dimensões detectadas: ${width}x${height}`);
 
     // 4) Configura encoder e resposta (stream)
     res.setHeader('Content-Type', 'image/gif');
@@ -105,7 +106,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     // 6) Processa frames
     for (const f of frames) {
       const delayMs = (f.frameInfo?.delay ?? 10) * 10; // fallback seguro
-      encoder.setDelay(delayMs);
+      encoder.setDelay(delayMs > 10 ? delayMs : 100); // Garante delay mínimo
 
       // Converte o frame (stream PNG) para imagem de canvas
       const frameBuf = await streamToBuffer(f.getImage());
@@ -115,33 +116,45 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.clearRect(0, 0, width, height);
       ctx.drawImage(frameImg, 0, 0, width, height);
 
-      // Overlay de textos / QR
+      // --- AJUSTES DE LAYOUT ---
       if (isTrilha) {
-        // QR no canto direito
+        // QR no canto direito, centralizado verticalmente
         if (qrImage) {
-          // Ajuste fino de posição/tamanho conforme seu layout
-          ctx.drawImage(qrImage, width - 120, 5, 110, 110);
+          const qrY = (height - 110) / 2; // Center QR vertically
+          ctx.drawImage(qrImage, width - 120, qrY > 0 ? qrY : 5 , 110, 110); // Ensure Y is not negative
         }
-        // Textos (Trilha)
+        // Textos (Trilha) - Adjusted X, Y and font size
         ctx.fillStyle = '#0E2923';
-        ctx.font = 'bold 18px sans-serif';
-        ctx.fillText(name, 160, 50);
+        ctx.font = 'bold 20px sans-serif'; // Increased font size
+        ctx.fillText(name, 150, 50); // Adjusted X
 
-        ctx.font = '14px sans-serif';
-        ctx.fillText(title, 160, 70);
+        ctx.font = '16px sans-serif'; // Increased font size
+        ctx.fillText(title, 150, 75); // Adjusted X and Y
 
-        ctx.font = 'bold 14px sans-serif';
-        ctx.fillText(phone, 160, 90);
+        ctx.font = 'bold 16px sans-serif'; // Increased font size
+        ctx.fillText(phone, 150, 98); // Adjusted X and Y
       } else {
-        // Textos padrão (outras empresas)
-        ctx.fillStyle = '#FFFFFF';
-        ctx.font = 'bold 16px sans-serif';
-        ctx.fillText(name, 170, 45);
+        // Textos padrão (outras empresas) - Adjusted X, Y and font size
+        ctx.fillStyle = '#FFFFFF'; // Default white, adjust as needed
+        const baseFontSize = 15; // Tamanho base da fonte
+        const lineSpacing = 5;   // Espaçamento entre linhas
+        const nameFontSize = baseFontSize + 3;
+        const textBlockHeight = (nameFontSize + lineSpacing + baseFontSize + lineSpacing + baseFontSize); // Altura aprox.
+        let currentY = (height - textBlockHeight) / 2 + nameFontSize; // Tenta centralizar
+        if (currentY < 20) currentY = 20; // Garante margem mínima no topo
 
-        ctx.font = '13px sans-serif';
-        ctx.fillText(title, 170, 65);
-        ctx.fillText(phone, 170, 85);
+        ctx.font = `bold ${nameFontSize}px sans-serif`; // Increased font size
+        ctx.fillText(name, 170, currentY);
+
+        currentY += baseFontSize + lineSpacing; // Add line height + spacing
+        ctx.font = `${baseFontSize}px sans-serif`; // Increased font size
+        ctx.fillText(title, 170, currentY);
+
+        currentY += baseFontSize + lineSpacing; // Add line height + spacing
+        ctx.font = `${baseFontSize}px sans-serif`; // Increased font size
+        ctx.fillText(phone, 170, currentY);
       }
+      // --- FIM AJUSTES DE LAYOUT ---
 
       // Adiciona frame
       encoder.addFrame(ctx);
@@ -172,8 +185,8 @@ app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, re
 // Healthcheck simples
 app.get('/test-connection', (_req, res) => res.json({ status: 'ok', message: 'Backend operacional.' }));
 
-// Root
-app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-STABLE está no ar!'));
+// Root (vRAILWAY-LAYOUTFIX)
+app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-LAYOUTFIX está no ar!'));
 
 /* ============================================
    S U B I N D O   S E R V I D O R
@@ -181,3 +194,4 @@ app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-STABLE está no a
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+
