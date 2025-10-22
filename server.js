@@ -67,7 +67,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     const frames = await gifFrames({
       url: gifBuffer,
       frames: 'all',
-      outputType: 'png'
+      outputType: 'png' // IMPORTANTE: Continuar usando PNG aqui
     });
 
     if (!frames || frames.length === 0) {
@@ -120,38 +120,38 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       if (isTrilha) {
         // QR no canto direito, centralizado verticalmente
         if (qrImage) {
-          const qrY = (height - 110) / 2; // Center QR vertically
-          ctx.drawImage(qrImage, width - 120, qrY > 0 ? qrY : 5 , 110, 110); // Ensure Y is not negative
+          const qrY = (height - 110) / 2; // Centraliza QR verticalmente
+          ctx.drawImage(qrImage, width - 120, qrY > 0 ? qrY : 5 , 110, 110); // Garante Y positivo
         }
-        // Textos (Trilha) - Adjusted X, Y and font size
+        // Textos (Trilha) - Tamanhos de fonte aumentados, posições ajustadas
         ctx.fillStyle = '#0E2923';
-        ctx.font = 'bold 20px sans-serif'; // Increased font size
-        ctx.fillText(name, 150, 50); // Adjusted X
+        ctx.font = 'bold 20px sans-serif'; // Tamanho maior
+        ctx.fillText(name, 150, 50); // Posição X ajustada
 
-        ctx.font = '16px sans-serif'; // Increased font size
-        ctx.fillText(title, 150, 75); // Adjusted X and Y
+        ctx.font = '16px sans-serif'; // Tamanho maior
+        ctx.fillText(title, 150, 75); // Posição X ajustada, Y aumentado
 
-        ctx.font = 'bold 16px sans-serif'; // Increased font size
-        ctx.fillText(phone, 150, 98); // Adjusted X and Y
+        ctx.font = 'bold 16px sans-serif'; // Tamanho maior
+        ctx.fillText(phone, 150, 98); // Posição X ajustada, Y aumentado
       } else {
-        // Textos padrão (outras empresas) - Adjusted X, Y and font size
-        ctx.fillStyle = '#FFFFFF'; // Default white, adjust as needed
-        const baseFontSize = 15; // Tamanho base da fonte
+        // Textos padrão (outras empresas) - Tamanhos maiores, tentativa de centralização vertical
+        ctx.fillStyle = '#FFFFFF'; // Branco como padrão
+        const baseFontSize = 15; // Tamanho base aumentado
         const lineSpacing = 5;   // Espaçamento entre linhas
         const nameFontSize = baseFontSize + 3;
         const textBlockHeight = (nameFontSize + lineSpacing + baseFontSize + lineSpacing + baseFontSize); // Altura aprox.
-        let currentY = (height - textBlockHeight) / 2 + nameFontSize; // Tenta centralizar
+        let currentY = (height - textBlockHeight) / 2 + nameFontSize; // Tenta centralizar verticalmente
         if (currentY < 20) currentY = 20; // Garante margem mínima no topo
 
-        ctx.font = `bold ${nameFontSize}px sans-serif`; // Increased font size
+        ctx.font = `bold ${nameFontSize}px sans-serif`; // Tamanho maior
         ctx.fillText(name, 170, currentY);
 
-        currentY += baseFontSize + lineSpacing; // Add line height + spacing
-        ctx.font = `${baseFontSize}px sans-serif`; // Increased font size
+        currentY += baseFontSize + lineSpacing;
+        ctx.font = `${baseFontSize}px sans-serif`; // Tamanho maior
         ctx.fillText(title, 170, currentY);
 
-        currentY += baseFontSize + lineSpacing; // Add line height + spacing
-        ctx.font = `${baseFontSize}px sans-serif`; // Increased font size
+        currentY += baseFontSize + lineSpacing;
+        ctx.font = `${baseFontSize}px sans-serif`; // Tamanho maior
         ctx.fillText(phone, 170, currentY);
       }
       // --- FIM AJUSTES DE LAYOUT ---
@@ -168,7 +168,6 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     if (!res.headersSent) {
       res.status(500).send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
     } else {
-      // stream já iniciou — não há como trocar o status; apenas logamos
       console.error('Erro após início do stream; resposta pode estar incompleta.');
     }
   }
@@ -185,7 +184,7 @@ app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, re
 // Healthcheck simples
 app.get('/test-connection', (_req, res) => res.json({ status: 'ok', message: 'Backend operacional.' }));
 
-// Root (vRAILWAY-LAYOUTFIX)
+// Root (vRAILWAY-LAYOUTFIX) - Atualize a mensagem de prova
 app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-LAYOUTFIX está no ar!'));
 
 /* ============================================
