@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS ANIMADAS (vMemOpt) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS ANIMADAS (vRender) ---
 
 // Importa as bibliotecas necessárias
 const express = require('express');
@@ -12,11 +12,8 @@ const fetch = require('node-fetch');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const corsOptions = {
-  origin: 'https://octopushelpdesk.com.br',
-  optionsSuccessStatus: 200
-};
-app.use(cors(corsOptions));
+// Permite requisições de qualquer origem, ideal para APIs públicas.
+app.use(cors());
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
@@ -40,11 +37,9 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
         
         const { width, height } = frameData[0].getImage();
         
-        // --- Otimização de Memória: Usando Stream ---
         res.setHeader('Content-Type', 'image/gif');
         const encoder = new GifEncoder(width, height, 'neuquant', true);
         
-        // Pipe a saída do encoder diretamente para a resposta da requisição
         encoder.createReadStream().pipe(res);
 
         encoder.start();
@@ -99,18 +94,22 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     }
 };
 
-app.post('/gerador-api/generate-gif-signature', (req, res) => {
+// Rota para GIFs genéricos
+app.post('/generate-gif-signature', (req, res) => {
     handleGifGeneration(req, res, false);
 });
 
-app.post('/gerador-api/generate-trilha-signature', (req, res) => {
+// Rota para o GIF da Trilha
+app.post('/generate-trilha-signature', (req, res) => {
     handleGifGeneration(req, res, true);
 });
 
-app.get('/gerador-api/', (req, res) => {
-    res.send('Servidor do gerador de assinaturas (vMemOpt) está no ar!');
+// Rota de verificação
+app.get('/', (req, res) => {
+    res.send('Servidor do gerador de assinaturas (vRender) está no ar!');
 });
 
+// Inicia o servidor
 app.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
 });
