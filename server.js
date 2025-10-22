@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - CORREÇÃO LAYOUT) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - LAYOUT REFINADO) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -67,7 +67,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     const frames = await gifFrames({
       url: gifBuffer,
       frames: 'all',
-      outputType: 'png' // IMPORTANTE: Continuar usando PNG aqui
+      outputType: 'png'
     });
 
     if (!frames || frames.length === 0) {
@@ -103,6 +103,25 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       }
     }
 
+    // --- Constantes de Layout REFINADAS ---
+    const qrWidth = Math.min(110, width * 0.25); // QR code com no max 25% da largura
+    const qrHeight = qrWidth;
+    const qrMarginRight = 10;
+    const qrMarginTop = 5;
+    const qrX = width - qrWidth - qrMarginRight;
+    const qrY = (height - qrHeight) / 2 > qrMarginTop ? (height - qrHeight) / 2 : qrMarginTop;
+
+    // Área estimada do logo (esquerda) - Ajuste conforme necessário
+    const logoAreaWidth = width * 0.38; // Logo ocupa ~38% da largura
+
+    // Área para texto
+    const textStartX = logoAreaWidth + 15; // Começa após o logo + margem maior
+    let textEndX = width - 15; // Termina antes da borda direita com margem
+    if (isTrilha) {
+        textEndX = qrX - 15; // Termina antes do QR + margem
+    }
+    const textAvailableWidth = textEndX - textStartX;
+
     // 6) Processa frames
     for (const f of frames) {
       const delayMs = (f.frameInfo?.delay ?? 10) * 10; // fallback seguro
@@ -116,45 +135,54 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.clearRect(0, 0, width, height);
       ctx.drawImage(frameImg, 0, 0, width, height);
 
-      // --- AJUSTES DE LAYOUT ---
+      // --- DESENHO COM LAYOUT REFINADO ---
       if (isTrilha) {
-        // QR no canto direito, centralizado verticalmente
+        // Desenha QR
         if (qrImage) {
-          const qrY = (height - 110) / 2; // Centraliza QR verticalmente
-          ctx.drawImage(qrImage, width - 120, qrY > 0 ? qrY : 5 , 110, 110); // Garante Y positivo
+          ctx.drawImage(qrImage, qrX, qrY, qrWidth, qrHeight);
         }
-        // Textos (Trilha) - Tamanhos de fonte aumentados, posições ajustadas
-        ctx.fillStyle = '#0E2923';
-        ctx.font = 'bold 20px sans-serif'; // Tamanho maior
-        ctx.fillText(name, 150, 50); // Posição X ajustada
+        // Textos (Trilha) - Fontes Maiores, Centralização Vertical
+        ctx.fillStyle = '#0E2923'; // Cor escura para Trilha
+        const trilhaBaseFontSize = Math.max(14, Math.min(18, height * 0.15)); // Fonte base maior
+        const trilhaLineSpacing = trilhaBaseFontSize * 0.4;
+        const trilhaNameFontSize = trilhaBaseFontSize + 4;
+        const trilhaTextBlockHeight = (trilhaNameFontSize + trilhaLineSpacing + trilhaBaseFontSize + trilhaLineSpacing + trilhaBaseFontSize);
+        let trilhaCurrentY = (height - trilhaTextBlockHeight) / 2 + trilhaNameFontSize;
+        if (trilhaCurrentY < trilhaNameFontSize + 5) trilhaCurrentY = trilhaNameFontSize + 5; // Margem topo
 
-        ctx.font = '16px sans-serif'; // Tamanho maior
-        ctx.fillText(title, 150, 75); // Posição X ajustada, Y aumentado
+        ctx.font = `bold ${trilhaNameFontSize}px sans-serif`;
+        ctx.fillText(name, textStartX, trilhaCurrentY, textAvailableWidth);
 
-        ctx.font = 'bold 16px sans-serif'; // Tamanho maior
-        ctx.fillText(phone, 150, 98); // Posição X ajustada, Y aumentado
+        trilhaCurrentY += trilhaBaseFontSize + trilhaLineSpacing;
+        ctx.font = `${trilhaBaseFontSize}px sans-serif`;
+        ctx.fillText(title, textStartX, trilhaCurrentY, textAvailableWidth);
+
+        trilhaCurrentY += trilhaBaseFontSize + trilhaLineSpacing;
+        ctx.font = `bold ${trilhaBaseFontSize}px sans-serif`;
+        ctx.fillText(phone, textStartX, trilhaCurrentY, textAvailableWidth);
+
       } else {
-        // Textos padrão (outras empresas) - Tamanhos maiores, tentativa de centralização vertical
-        ctx.fillStyle = '#FFFFFF'; // Branco como padrão
-        const baseFontSize = 15; // Tamanho base aumentado
-        const lineSpacing = 5;   // Espaçamento entre linhas
-        const nameFontSize = baseFontSize + 3;
-        const textBlockHeight = (nameFontSize + lineSpacing + baseFontSize + lineSpacing + baseFontSize); // Altura aprox.
-        let currentY = (height - textBlockHeight) / 2 + nameFontSize; // Tenta centralizar verticalmente
-        if (currentY < 20) currentY = 20; // Garante margem mínima no topo
+        // Textos padrão (outras empresas) - Fonte Maior, Branco Padrão
+        ctx.fillStyle = '#FFFFFF'; // Branco como padrão - ALTERAR SE NECESSÁRIO PARA FUNDOS CLAROS
+        const baseFontSize = Math.max(13, Math.min(16, height * 0.12)); // Fonte base maior
+        const lineSpacing = baseFontSize * 0.35;
+        const nameFontSize = baseFontSize + 2;
+        const textBlockHeight = (nameFontSize + lineSpacing + baseFontSize + lineSpacing + baseFontSize);
+        let currentY = (height - textBlockHeight) / 2 + nameFontSize;
+        if (currentY < nameFontSize + 5) currentY = nameFontSize + 5; // Margem topo
 
-        ctx.font = `bold ${nameFontSize}px sans-serif`; // Tamanho maior
-        ctx.fillText(name, 170, currentY);
-
-        currentY += baseFontSize + lineSpacing;
-        ctx.font = `${baseFontSize}px sans-serif`; // Tamanho maior
-        ctx.fillText(title, 170, currentY);
+        ctx.font = `bold ${nameFontSize}px sans-serif`;
+        ctx.fillText(name, textStartX, currentY, textAvailableWidth);
 
         currentY += baseFontSize + lineSpacing;
-        ctx.font = `${baseFontSize}px sans-serif`; // Tamanho maior
-        ctx.fillText(phone, 170, currentY);
+        ctx.font = `${baseFontSize}px sans-serif`;
+        ctx.fillText(title, textStartX, currentY, textAvailableWidth);
+
+        currentY += baseFontSize + lineSpacing;
+        ctx.font = `${baseFontSize}px sans-serif`;
+        ctx.fillText(phone, textStartX, currentY, textAvailableWidth);
       }
-      // --- FIM AJUSTES DE LAYOUT ---
+      // --- FIM DESENHO COM LAYOUT REFINADO ---
 
       // Adiciona frame
       encoder.addFrame(ctx);
@@ -184,8 +212,8 @@ app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, re
 // Healthcheck simples
 app.get('/test-connection', (_req, res) => res.json({ status: 'ok', message: 'Backend operacional.' }));
 
-// Root (vRAILWAY-LAYOUTFIX) - Atualize a mensagem de prova
-app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-LAYOUTFIX está no ar!'));
+// Root (vRAILWAY-LAYOUTREFINED)
+app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-LAYOUTREFINED está no ar!'));
 
 /* ============================================
    S U B I N D O   S E R V I D O R
