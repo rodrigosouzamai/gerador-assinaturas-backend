@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - VERSÃO ESTÁVEL & RESPONSIVA) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - LAYOUT MAIOR) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -14,7 +14,7 @@ const PORT = process.env.PORT || 3000;
    C O R S   R E S T R I T O
    ========================= */
 const corsOptions = {
-  origin: 'https://octopushelpdesk.com.br', // ajuste se precisar
+  origin: 'https://octopushelpdesk.com.br', // ajuste se precisar liberar outro domínio
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   optionsSuccessStatus: 200
@@ -29,7 +29,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
    H E L P E R S
    ============================================ */
 
-// Converte um stream (do gif-frames em PNG) para Buffer
+// Converte um stream (gif-frames em PNG) para Buffer
 const streamToBuffer = (stream) =>
   new Promise((resolve, reject) => {
     const chunks = [];
@@ -47,9 +47,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
 
   // Validações
   if (!gifUrl || !name || !title || !phone) {
-    return res
-      .status(400)
-      .send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
+    return res.status(400).send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
   }
   if (isTrilha && !qrCodeData) {
     return res.status(400).send('Erro: QR Code é obrigatório para a assinatura da Trilha.');
@@ -76,11 +74,12 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       throw new Error('Nenhum frame encontrado no GIF.');
     }
 
-    // 3) Dimensões a partir do primeiro frame
+    // 3) Dimensões a partir do primeiro frame (PNG)
     const firstBuf = await streamToBuffer(frames[0].getImage());
     const firstImg = await loadImage(firstBuf);
     const width = firstImg.width;
     const height = firstImg.height;
+    console.log(`[ASSINATURA] Dimensões detectadas: ${width}x${height}`);
 
     // 4) Configura encoder e resposta (stream)
     res.setHeader('Content-Type', 'image/gif');
@@ -88,7 +87,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     encoder.createReadStream().pipe(res);
 
     encoder.start();
-    encoder.setRepeat(0); // loop infinito
+    encoder.setRepeat(0);   // loop infinito
     encoder.setQuality(10); // 1 (melhor) a 30 (pior)
 
     const canvas = createCanvas(width, height);
@@ -104,12 +103,33 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       }
     }
 
+    // --- Constantes de Layout MAIORES ---
+    // QR Code ocupa ~30% da largura, mínimo 100px, máximo 150px
+    const qrWidth = Math.max(100, Math.min(150, width * 0.30));
+    const qrHeight = qrWidth;
+    const qrMarginRight = 15;
+    const qrMarginTop = 10;
+    const qrX = width - qrWidth - qrMarginRight;
+    // Tenta centralizar verticalmente, com margem mínima
+    const qrY = (height - qrHeight) / 2 > qrMarginTop ? (height - qrHeight) / 2 : qrMarginTop;
+
+    // Área estimada do logo (esquerda) - Mantendo ~40%
+    const logoAreaWidth = width * 0.40;
+
+    // Área para texto - Começa mais tarde, termina antes do QR/borda
+    const textStartX = logoAreaWidth + 20; // Mais margem
+    let textEndX = width - 20; // Mais margem direita
+    if (isTrilha) {
+        textEndX = qrX - 20; // Mais margem antes do QR
+    }
+    const textAvailableWidth = Math.max(50, textEndX - textStartX); // Garante largura mínima
+
     // 6) Processa frames
     for (const f of frames) {
       const delayMs = (f.frameInfo?.delay ?? 10) * 10; // fallback seguro
-      encoder.setDelay(delayMs);
+      encoder.setDelay(delayMs > 10 ? delayMs : 100); // Garante delay mínimo
 
-      // Converte frame (stream PNG) para imagem
+      // Converte o frame (stream PNG) para imagem de canvas
       const frameBuf = await streamToBuffer(f.getImage());
       const frameImg = await loadImage(frameBuf);
 
@@ -117,65 +137,58 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.clearRect(0, 0, width, height);
       ctx.drawImage(frameImg, 0, 0, width, height);
 
-      // ======= POSICIONAMENTO RESPONSIVO =======
-      const padding = 16;
-
-      // Tamanho do QR: limitado para caber com margem; evita cortar
-      const qrSize = isTrilha
-        ? Math.min(120, Math.max(80, Math.min(height - padding * 2, width * 0.25)))
-        : 0; // só Trilha usa QR
-
-      // Reserva área à direita para o QR
-      const rightReserved = isTrilha ? qrSize + padding * 2 : 0;
-
-      // Safe area para textos (lado esquerdo), respeitando logo da Trilha
-      const textLeft = 140; // deixa espaço pro logo
-      const textRight = width - rightReserved - padding;
-      const textMaxWidth = Math.max(0, textRight - textLeft);
-
-      // Posição do QR (direita, centralizado na vertical)
-      const qrX = width - padding - qrSize;
-      const qrY = Math.round((height - qrSize) / 2);
-
-      // ======= DESENHO DE QR E TEXTOS =======
+      // --- DESENHO COM LAYOUT MAIOR ---
       if (isTrilha) {
-        // Fundo claro atrás do QR para contraste
+        // Desenha QR
         if (qrImage) {
-          ctx.fillStyle = 'rgba(255,255,255,0.92)';
-          ctx.fillRect(qrX - 6, qrY - 6, qrSize + 12, qrSize + 12);
-          ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+          ctx.drawImage(qrImage, qrX, qrY, qrWidth, qrHeight);
         }
+        // Textos (Trilha) - Fontes BEM Maiores
+        ctx.fillStyle = '#0E2923'; // Cor escura para Trilha
+        // Tamanho base ~20% da altura, mínimo 18px, máximo 24px
+        const trilhaBaseFontSize = Math.max(18, Math.min(24, height * 0.20));
+        const trilhaLineSpacing = trilhaBaseFontSize * 0.5; // Maior espaçamento
+        const trilhaNameFontSize = trilhaBaseFontSize + 6; // Nome ainda maior
+        // Recalcula altura do bloco de texto e posição Y inicial
+        const trilhaTextBlockHeight = (trilhaNameFontSize + trilhaLineSpacing + trilhaBaseFontSize + trilhaLineSpacing + trilhaBaseFontSize);
+        let trilhaCurrentY = (height - trilhaTextBlockHeight) / 2 + trilhaNameFontSize;
+        if (trilhaCurrentY < trilhaNameFontSize + 10) trilhaCurrentY = trilhaNameFontSize + 10; // Margem topo maior
 
-        // Textos Trilha
-        ctx.fillStyle = '#0E2923';
-        ctx.textBaseline = 'top';
+        ctx.font = `bold ${trilhaNameFontSize}px sans-serif`;
+        ctx.fillText(name, textStartX, trilhaCurrentY, textAvailableWidth);
 
-        ctx.font = 'bold 18px sans-serif';
-        ctx.fillText(name, textLeft, 26, textMaxWidth);
+        trilhaCurrentY += trilhaBaseFontSize + trilhaLineSpacing;
+        ctx.font = `${trilhaBaseFontSize}px sans-serif`;
+        ctx.fillText(title, textStartX, trilhaCurrentY, textAvailableWidth);
 
-        ctx.font = '14px sans-serif';
-        ctx.fillText(title, textLeft, 48, textMaxWidth);
+        trilhaCurrentY += trilhaBaseFontSize + trilhaLineSpacing;
+        ctx.font = `bold ${trilhaBaseFontSize}px sans-serif`;
+        ctx.fillText(phone, textStartX, trilhaCurrentY, textAvailableWidth);
 
-        ctx.font = 'bold 14px sans-serif';
-        ctx.fillText(phone, textLeft, 68, textMaxWidth);
       } else {
-        // Fundo de contraste opcional (útil em GIFs claros, ex.: Pinterest)
-        const badgeX = 150;
-        const badgeY = 18;
-        const badgeW = 240;
-        const badgeH = 70;
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(badgeX, badgeY, badgeW, badgeH);
+        // Textos padrão (outras empresas) - Fontes Maiores, Branco Padrão
+        ctx.fillStyle = '#FFFFFF'; // Branco como padrão
+        // Tamanho base ~18% da altura, mínimo 16px, máximo 20px
+        const baseFontSize = Math.max(16, Math.min(20, height * 0.18));
+        const lineSpacing = baseFontSize * 0.4; // Maior espaçamento
+        const nameFontSize = baseFontSize + 4; // Nome maior
+        // Recalcula altura do bloco de texto e posição Y inicial
+        const textBlockHeight = (nameFontSize + lineSpacing + baseFontSize + lineSpacing + baseFontSize);
+        let currentY = (height - textBlockHeight) / 2 + nameFontSize;
+        if (currentY < nameFontSize + 10) currentY = nameFontSize + 10; // Margem topo maior
 
-        ctx.fillStyle = '#FFFFFF';
-        ctx.textBaseline = 'top';
-        ctx.font = 'bold 16px sans-serif';
-        ctx.fillText(name, badgeX + 10, badgeY + 10, badgeW - 20);
+        ctx.font = `bold ${nameFontSize}px sans-serif`;
+        ctx.fillText(name, textStartX, currentY, textAvailableWidth);
 
-        ctx.font = '13px sans-serif';
-        ctx.fillText(title, badgeX + 10, badgeY + 32, badgeW - 20);
-        ctx.fillText(phone, badgeX + 10, badgeY + 50, badgeW - 20);
+        currentY += baseFontSize + lineSpacing;
+        ctx.font = `${baseFontSize}px sans-serif`;
+        ctx.fillText(title, textStartX, currentY, textAvailableWidth);
+
+        currentY += baseFontSize + lineSpacing;
+        ctx.font = `${baseFontSize}px sans-serif`;
+        ctx.fillText(phone, textStartX, currentY, textAvailableWidth);
       }
+      // --- FIM DESENHO COM LAYOUT MAIOR ---
 
       // Adiciona frame
       encoder.addFrame(ctx);
@@ -187,9 +200,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
   } catch (error) {
     console.error('[ASSINATURA] ERRO:', error);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
+      res.status(500).send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
     } else {
       console.error('Erro após início do stream; resposta pode estar incompleta.');
     }
@@ -204,13 +215,11 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
 app.post('/generate-gif-signature', (req, res) => handleGifGeneration(req, res, false));
 app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, res, true));
 
-// Healthcheck
-app.get('/test-connection', (_req, res) =>
-  res.json({ status: 'ok', message: 'Backend operacional.' })
-);
+// Healthcheck simples
+app.get('/test-connection', (_req, res) => res.json({ status: 'ok', message: 'Backend operacional.' }));
 
-// Root
-app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-STABLE está no ar!'));
+// Root (vRAILWAY-LAYOUT-LARGER) - Nova versão para prova
+app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-LAYOUT-LARGER está no ar!'));
 
 /* ============================================
    S U B I N D O   S E R V I D O R
@@ -218,3 +227,4 @@ app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-STABLE está no a
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+
