@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (RAILWAY/RENDER - LAYOUT MAIOR) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (SAÍDA FIXA 635x215, LAYOUT 2 COLUNAS) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,12 +9,13 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const BUILD_VERSION = '2025-10-22-r3';
 
 /* =========================
    C O R S   R E S T R I T O
    ========================= */
 const corsOptions = {
-  origin: 'https://octopushelpdesk.com.br', // ajuste se precisar liberar outro domínio
+  origin: 'https://octopushelpdesk.com.br', // ajuste se precisar
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   optionsSuccessStatus: 200
@@ -29,7 +30,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
    H E L P E R S
    ============================================ */
 
-// Converte um stream (gif-frames em PNG) para Buffer
+// Converte um stream (do gif-frames em PNG) para Buffer
 const streamToBuffer = (stream) =>
   new Promise((resolve, reject) => {
     const chunks = [];
@@ -38,29 +39,64 @@ const streamToBuffer = (stream) =>
     stream.on('error', reject);
   });
 
+// Desenha a imagem "contida" em uma caixa (sem cortar nem distorcer)
+function drawContain(ctx, img, boxX, boxY, boxW, boxH) {
+  const s = Math.min(boxW / img.width, boxH / img.height);
+  const dw = Math.round(img.width * s);
+  const dh = Math.round(img.height * s);
+  const dx = Math.round(boxX + (boxW - dw) / 2);
+  const dy = Math.round(boxY + (boxH - dh) / 2);
+  ctx.drawImage(img, dx, dy, dw, dh);
+}
+
+// Quebra simples de linha por largura
+function drawTextWrap(ctx, text, x, y, maxWidth, lineHeight) {
+  if (!text) return y;
+  const words = String(text).split(/\s+/);
+  let line = '';
+  for (let n = 0; n < words.length; n++) {
+    const test = line ? line + ' ' + words[n] : words[n];
+    if (ctx.measureText(test).width > maxWidth && n > 0) {
+      ctx.fillText(line, x, y);
+      line = words[n];
+      y += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, y);
+  return y;
+}
+
 /* ============================================
    L Ó G I C A   D E   G E R A Ç Ã O   D E   G I F
    ============================================ */
 
 const handleGifGeneration = async (req, res, isTrilha = false) => {
-  const { name, title, phone, gifUrl, qrCodeData } = req.body;
+  const { name, title, phone, gifUrl, qrCodeData, address } = req.body;
 
   // Validações
   if (!gifUrl || !name || !title || !phone) {
-    return res.status(400).send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
+    return res
+      .status(400)
+      .send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
   }
   if (isTrilha && !qrCodeData) {
     return res.status(400).send('Erro: QR Code é obrigatório para a assinatura da Trilha.');
   }
 
+  // Tamanho final (fixo desejado) com possibilidade de override
+  const outW = Number(req.body.outWidth)  || 635;
+  const outH = Number(req.body.outHeight) || 215;
+
   try {
-    console.log(`[ASSINATURA] Início | empresa=${isTrilha ? 'Trilha' : 'Outra'} | nome=${name}`);
+    console.log(
+      `[ASSINATURA] ${BUILD_VERSION} | ${isTrilha ? 'Trilha' : 'Outra'} | ${name} | ${outW}x${outH}`
+    );
 
     // 1) Baixa o GIF de origem
     const gifResp = await fetch(gifUrl);
-    if (!gifResp.ok) {
-      throw new Error(`Falha ao buscar GIF (${gifResp.status} ${gifResp.statusText})`);
-    }
+    if (!gifResp.ok) throw new Error(`Falha ao buscar GIF (${gifResp.status} ${gifResp.statusText})`);
     const gifBuffer = await gifResp.buffer();
 
     // 2) Extrai frames como PNG (evita DOM/document)
@@ -69,126 +105,108 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       frames: 'all',
       outputType: 'png'
     });
+    if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
 
-    if (!frames || frames.length === 0) {
-      throw new Error('Nenhum frame encontrado no GIF.');
-    }
-
-    // 3) Dimensões a partir do primeiro frame (PNG)
-    const firstBuf = await streamToBuffer(frames[0].getImage());
-    const firstImg = await loadImage(firstBuf);
-    const width = firstImg.width;
-    const height = firstImg.height;
-    console.log(`[ASSINATURA] Dimensões detectadas: ${width}x${height}`);
-
-    // 4) Configura encoder e resposta (stream)
+    // 3) Encoder e canvas no tamanho final fixo
     res.setHeader('Content-Type', 'image/gif');
-    const encoder = new GifEncoder(width, height, 'neuquant', true);
+    const encoder = new GifEncoder(outW, outH, 'neuquant', true);
     encoder.createReadStream().pipe(res);
-
     encoder.start();
-    encoder.setRepeat(0);   // loop infinito
-    encoder.setQuality(10); // 1 (melhor) a 30 (pior)
+    encoder.setRepeat(0);
+    encoder.setQuality(10);
 
-    const canvas = createCanvas(width, height);
+    const canvas = createCanvas(outW, outH);
     const ctx = canvas.getContext('2d');
 
-    // 5) Pré-carrega QR (se Trilha)
+    // 4) Pré-carrega QR (se Trilha)
     let qrImage = null;
     if (isTrilha) {
       try {
         qrImage = await loadImage(qrCodeData);
-      } catch (e) {
+      } catch {
         throw new Error('Falha ao carregar QR Code (qrCodeData inválido?).');
       }
     }
 
-    // --- Constantes de Layout MAIORES ---
-    // QR Code ocupa ~30% da largura, mínimo 100px, máximo 150px
-    const qrWidth = Math.max(100, Math.min(150, width * 0.30));
-    const qrHeight = qrWidth;
-    const qrMarginRight = 15;
-    const qrMarginTop = 10;
-    const qrX = width - qrWidth - qrMarginRight;
-    // Tenta centralizar verticalmente, com margem mínima
-    const qrY = (height - qrHeight) / 2 > qrMarginTop ? (height - qrHeight) / 2 : qrMarginTop;
-
-    // Área estimada do logo (esquerda) - Mantendo ~40%
-    const logoAreaWidth = width * 0.40;
-
-    // Área para texto - Começa mais tarde, termina antes do QR/borda
-    const textStartX = logoAreaWidth + 20; // Mais margem
-    let textEndX = width - 20; // Mais margem direita
-    if (isTrilha) {
-        textEndX = qrX - 20; // Mais margem antes do QR
-    }
-    const textAvailableWidth = Math.max(50, textEndX - textStartX); // Garante largura mínima
+    // 5) Layout base (duas colunas)
+    const padding = 16;
+    const leftColW = 220; // coluna do logo/GIF à esquerda (se quiser ajustar, altere aqui)
+    const dividerX = leftColW; // posição da divisória azul
+    const textLeft = dividerX + 12;
+    const textAreaRightBase = outW - padding;
 
     // 6) Processa frames
     for (const f of frames) {
-      const delayMs = (f.frameInfo?.delay ?? 10) * 10; // fallback seguro
-      encoder.setDelay(delayMs > 10 ? delayMs : 100); // Garante delay mínimo
+      const delayMs = (f.frameInfo?.delay ?? 10) * 10;
+      encoder.setDelay(delayMs);
 
-      // Converte o frame (stream PNG) para imagem de canvas
       const frameBuf = await streamToBuffer(f.getImage());
       const frameImg = await loadImage(frameBuf);
 
-      // Desenha base
-      ctx.clearRect(0, 0, width, height);
-      ctx.drawImage(frameImg, 0, 0, width, height);
+      // Fundo branco (caso o GIF tenha transparência)
+      ctx.clearRect(0, 0, outW, outH);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, outW, outH);
 
-      // --- DESENHO COM LAYOUT MAIOR ---
-      if (isTrilha) {
-        // Desenha QR
-        if (qrImage) {
-          ctx.drawImage(qrImage, qrX, qrY, qrWidth, qrHeight);
-        }
-        // Textos (Trilha) - Fontes BEM Maiores
-        ctx.fillStyle = '#0E2923'; // Cor escura para Trilha
-        // Tamanho base ~20% da altura, mínimo 18px, máximo 24px
-        const trilhaBaseFontSize = Math.max(18, Math.min(24, height * 0.20));
-        const trilhaLineSpacing = trilhaBaseFontSize * 0.5; // Maior espaçamento
-        const trilhaNameFontSize = trilhaBaseFontSize + 6; // Nome ainda maior
-        // Recalcula altura do bloco de texto e posição Y inicial
-        const trilhaTextBlockHeight = (trilhaNameFontSize + trilhaLineSpacing + trilhaBaseFontSize + trilhaLineSpacing + trilhaBaseFontSize);
-        let trilhaCurrentY = (height - trilhaTextBlockHeight) / 2 + trilhaNameFontSize;
-        if (trilhaCurrentY < trilhaNameFontSize + 10) trilhaCurrentY = trilhaNameFontSize + 10; // Margem topo maior
+      // Esquerda: GIF contido
+      drawContain(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
-        ctx.font = `bold ${trilhaNameFontSize}px sans-serif`;
-        ctx.fillText(name, textStartX, trilhaCurrentY, textAvailableWidth);
+      // Divisória vertical azul
+      ctx.fillStyle = '#1C4C9A';
+      ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
 
-        trilhaCurrentY += trilhaBaseFontSize + trilhaLineSpacing;
-        ctx.font = `${trilhaBaseFontSize}px sans-serif`;
-        ctx.fillText(title, textStartX, trilhaCurrentY, textAvailableWidth);
+      // Se for Trilha, QR na extrema direita
+      let textAreaRight = textAreaRightBase;
+      if (isTrilha && qrImage) {
+        const qrSize = Math.min(110, outH - padding * 2);
+        const qrX = outW - padding - qrSize;
+        const qrY = Math.round((outH - qrSize) / 2);
 
-        trilhaCurrentY += trilhaBaseFontSize + trilhaLineSpacing;
-        ctx.font = `bold ${trilhaBaseFontSize}px sans-serif`;
-        ctx.fillText(phone, textStartX, trilhaCurrentY, textAvailableWidth);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(qrX - 6, qrY - 6, qrSize + 12, qrSize + 12);
+        ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
 
-      } else {
-        // Textos padrão (outras empresas) - Fontes Maiores, Branco Padrão
-        ctx.fillStyle = '#FFFFFF'; // Branco como padrão
-        // Tamanho base ~18% da altura, mínimo 16px, máximo 20px
-        const baseFontSize = Math.max(16, Math.min(20, height * 0.18));
-        const lineSpacing = baseFontSize * 0.4; // Maior espaçamento
-        const nameFontSize = baseFontSize + 4; // Nome maior
-        // Recalcula altura do bloco de texto e posição Y inicial
-        const textBlockHeight = (nameFontSize + lineSpacing + baseFontSize + lineSpacing + baseFontSize);
-        let currentY = (height - textBlockHeight) / 2 + nameFontSize;
-        if (currentY < nameFontSize + 10) currentY = nameFontSize + 10; // Margem topo maior
-
-        ctx.font = `bold ${nameFontSize}px sans-serif`;
-        ctx.fillText(name, textStartX, currentY, textAvailableWidth);
-
-        currentY += baseFontSize + lineSpacing;
-        ctx.font = `${baseFontSize}px sans-serif`;
-        ctx.fillText(title, textStartX, currentY, textAvailableWidth);
-
-        currentY += baseFontSize + lineSpacing;
-        ctx.font = `${baseFontSize}px sans-serif`;
-        ctx.fillText(phone, textStartX, currentY, textAvailableWidth);
+        textAreaRight = qrX - 12; // textos não invadem o QR
       }
-      // --- FIM DESENHO COM LAYOUT MAIOR ---
+
+      // Direita: textos
+      const textMaxWidth = textAreaRight - textLeft;
+
+      // Paleta
+      const nameColor = isTrilha ? '#0E2923' : '#0E2B66';
+      const normalColor = isTrilha ? '#0E2923' : '#2E3A4A';
+      const addressColor = '#6A7280';
+
+      // Tamanhos (ajustados para 215px de altura)
+      const nameSize = 22;
+      const subSize = 16;
+      const lineH = 20;
+      const addrSize = 12;
+      const addrLineH = 15;
+
+      let y = padding; // topo
+
+      // Nome
+      ctx.fillStyle = nameColor;
+      ctx.textBaseline = 'top';
+      ctx.font = `bold ${nameSize}px sans-serif`;
+      y = drawTextWrap(ctx, name, textLeft, y, textMaxWidth, lineH) + 6;
+
+      // Cargo
+      ctx.fillStyle = normalColor;
+      ctx.font = `${subSize}px sans-serif`;
+      y = drawTextWrap(ctx, title, textLeft, y, textMaxWidth, lineH);
+
+      // Telefone
+      ctx.font = `bold ${subSize}px sans-serif`;
+      y = drawTextWrap(ctx, phone, textLeft, y + 2, textMaxWidth, lineH);
+
+      // Endereço (opcional, como no preview)
+      if (address) {
+        ctx.fillStyle = addressColor;
+        ctx.font = `${addrSize}px sans-serif`;
+        drawTextWrap(ctx, address, textLeft, y + 6, textMaxWidth, addrLineH);
+      }
 
       // Adiciona frame
       encoder.addFrame(ctx);
@@ -196,11 +214,13 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
 
     // 7) Finaliza
     encoder.finish();
-    console.log('[ASSINATURA] Concluído com sucesso.');
+    console.log(`[ASSINATURA] OK ${BUILD_VERSION}`);
   } catch (error) {
     console.error('[ASSINATURA] ERRO:', error);
     if (!res.headersSent) {
-      res.status(500).send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
+      res
+        .status(500)
+        .send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
     } else {
       console.error('Erro após início do stream; resposta pode estar incompleta.');
     }
@@ -211,20 +231,18 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
    R O T A S
    ============================================ */
 
-// Rotas principais usadas pelo front (sem prefixo)
+// Outras empresas
 app.post('/generate-gif-signature', (req, res) => handleGifGeneration(req, res, false));
+// Trilha (com QR)
 app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, res, true));
 
-// Healthcheck simples
-app.get('/test-connection', (_req, res) => res.json({ status: 'ok', message: 'Backend operacional.' }));
-
-// Root (vRAILWAY-LAYOUT-LARGER) - Nova versão para prova
-app.get('/', (_req, res) => res.send('PROVA: Servidor vRAILWAY-LAYOUT-LARGER está no ar!'));
+// Healthcheck & versão
+app.get('/version', (_req, res) => res.json({ version: BUILD_VERSION }));
+app.get('/', (_req, res) => res.send(`Servidor no ar! build=${BUILD_VERSION}`));
 
 /* ============================================
    S U B I N D O   S E R V I D O R
    ============================================ */
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor rodando na porta ${PORT}`);
+  console.log(`Servidor rodando na porta ${PORT} | build=${BUILD_VERSION}`);
 });
-
