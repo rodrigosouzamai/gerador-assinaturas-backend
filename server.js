@@ -1,4 +1,4 @@
-// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (SAÍDA FIXA 635x215, LAYOUT 2 COLUNAS) ---
+// --- SERVIDOR NODE.JS PARA GERAÇÃO DE ASSINATURAS (635x215, LAYOUT 2 COLUNAS, CAMPOS COMPLETOS) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,13 +9,13 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BUILD_VERSION = '2025-10-22-r3';
+const BUILD_VERSION = '2025-10-22-r4';
 
 /* =========================
    C O R S   R E S T R I T O
    ========================= */
 const corsOptions = {
-  origin: 'https://octopushelpdesk.com.br', // ajuste se precisar
+  origin: 'https://octopushelpdesk.com.br',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   optionsSuccessStatus: 200
@@ -30,7 +30,6 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
    H E L P E R S
    ============================================ */
 
-// Converte um stream (do gif-frames em PNG) para Buffer
 const streamToBuffer = (stream) =>
   new Promise((resolve, reject) => {
     const chunks = [];
@@ -39,7 +38,6 @@ const streamToBuffer = (stream) =>
     stream.on('error', reject);
   });
 
-// Desenha a imagem "contida" em uma caixa (sem cortar nem distorcer)
 function drawContain(ctx, img, boxX, boxY, boxW, boxH) {
   const s = Math.min(boxW / img.width, boxH / img.height);
   const dw = Math.round(img.width * s);
@@ -49,13 +47,12 @@ function drawContain(ctx, img, boxX, boxY, boxW, boxH) {
   ctx.drawImage(img, dx, dy, dw, dh);
 }
 
-// Quebra simples de linha por largura
 function drawTextWrap(ctx, text, x, y, maxWidth, lineHeight) {
   if (!text) return y;
   const words = String(text).split(/\s+/);
   let line = '';
   for (let n = 0; n < words.length; n++) {
-    const test = line ? line + ' ' + words[n] : words[n];
+    const test = line ? `${line} ${words[n]}` : words[n];
     if (ctx.measureText(test).width > maxWidth && n > 0) {
       ctx.fillText(line, x, y);
       line = words[n];
@@ -69,45 +66,47 @@ function drawTextWrap(ctx, text, x, y, maxWidth, lineHeight) {
 }
 
 /* ============================================
-   L Ó G I C A   D E   G E R A Ç Ã O   D E   G I F
+   G E R A Ç Ã O   D E   G I F
    ============================================ */
 
 const handleGifGeneration = async (req, res, isTrilha = false) => {
-  const { name, title, phone, gifUrl, qrCodeData, address } = req.body;
+  const {
+    name,           // Nome
+    department,     // Departamento
+    title,          // Cargo
+    phone,          // Telefone
+    email,          // (opcional)
+    address,        // Endereço (opcional)
+    gifUrl,
+    qrCodeData,     // obrigatório na Trilha
+    outWidth,
+    outHeight
+  } = req.body;
 
-  // Validações
   if (!gifUrl || !name || !title || !phone) {
-    return res
-      .status(400)
-      .send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
+    return res.status(400).send('Erro: faltam parâmetros obrigatórios (nome, cargo, telefone, gifUrl).');
   }
   if (isTrilha && !qrCodeData) {
     return res.status(400).send('Erro: QR Code é obrigatório para a assinatura da Trilha.');
   }
 
-  // Tamanho final (fixo desejado) com possibilidade de override
-  const outW = Number(req.body.outWidth)  || 635;
-  const outH = Number(req.body.outHeight) || 215;
+  // tamanho final (padrão solicitado 635x215)
+  const outW = Number(outWidth)  || 635;
+  const outH = Number(outHeight) || 215;
 
   try {
-    console.log(
-      `[ASSINATURA] ${BUILD_VERSION} | ${isTrilha ? 'Trilha' : 'Outra'} | ${name} | ${outW}x${outH}`
-    );
+    console.log(`[ASSINATURA] ${BUILD_VERSION} | ${isTrilha ? 'Trilha' : 'Outras'} | ${name} | ${outW}x${outH}`);
 
-    // 1) Baixa o GIF de origem
+    // 1) Baixa GIF
     const gifResp = await fetch(gifUrl);
     if (!gifResp.ok) throw new Error(`Falha ao buscar GIF (${gifResp.status} ${gifResp.statusText})`);
     const gifBuffer = await gifResp.buffer();
 
-    // 2) Extrai frames como PNG (evita DOM/document)
-    const frames = await gifFrames({
-      url: gifBuffer,
-      frames: 'all',
-      outputType: 'png'
-    });
+    // 2) Frames como PNG
+    const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
 
-    // 3) Encoder e canvas no tamanho final fixo
+    // 3) Encoder/canvas
     res.setHeader('Content-Type', 'image/gif');
     const encoder = new GifEncoder(outW, outH, 'neuquant', true);
     encoder.createReadStream().pipe(res);
@@ -118,7 +117,7 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
     const canvas = createCanvas(outW, outH);
     const ctx = canvas.getContext('2d');
 
-    // 4) Pré-carrega QR (se Trilha)
+    // 4) QR (Trilha)
     let qrImage = null;
     if (isTrilha) {
       try {
@@ -128,14 +127,13 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       }
     }
 
-    // 5) Layout base (duas colunas)
+    // 5) Layout base
     const padding = 16;
-    const leftColW = 220; // coluna do logo/GIF à esquerda (se quiser ajustar, altere aqui)
-    const dividerX = leftColW; // posição da divisória azul
+    const leftColW = 220;       // coluna do GIF
+    const dividerX = leftColW;  // posição da divisória azul
     const textLeft = dividerX + 12;
     const textAreaRightBase = outW - padding;
 
-    // 6) Processa frames
     for (const f of frames) {
       const delayMs = (f.frameInfo?.delay ?? 10) * 10;
       encoder.setDelay(delayMs);
@@ -143,54 +141,59 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       const frameBuf = await streamToBuffer(f.getImage());
       const frameImg = await loadImage(frameBuf);
 
-      // Fundo branco (caso o GIF tenha transparência)
+      // Fundo branco
       ctx.clearRect(0, 0, outW, outH);
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, outW, outH);
 
-      // Esquerda: GIF contido
+      // GIF à esquerda
       drawContain(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
-      // Divisória vertical azul
+      // Divisor azul
       ctx.fillStyle = '#1C4C9A';
       ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
 
-      // Se for Trilha, QR na extrema direita
+      // QR (Trilha)
       let textAreaRight = textAreaRightBase;
       if (isTrilha && qrImage) {
         const qrSize = Math.min(110, outH - padding * 2);
         const qrX = outW - padding - qrSize;
         const qrY = Math.round((outH - qrSize) / 2);
-
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(qrX - 6, qrY - 6, qrSize + 12, qrSize + 12);
         ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
-
-        textAreaRight = qrX - 12; // textos não invadem o QR
+        textAreaRight = qrX - 12; // evita sobrepor o QR
       }
 
-      // Direita: textos
+      // Área de texto
       const textMaxWidth = textAreaRight - textLeft;
 
       // Paleta
-      const nameColor = isTrilha ? '#0E2923' : '#0E2B66';
-      const normalColor = isTrilha ? '#0E2923' : '#2E3A4A';
-      const addressColor = '#6A7280';
+      const nameColor    = isTrilha ? '#0E2923' : '#0E2B66';
+      const normalColor  = isTrilha ? '#0E2923' : '#2E3A4A';
+      const subtleColor  = '#6A7280';
 
-      // Tamanhos (ajustados para 215px de altura)
-      const nameSize = 22;
-      const subSize = 16;
-      const lineH = 20;
-      const addrSize = 12;
-      const addrLineH = 15;
+      // Tamanhos para 215px de altura
+      const nameSize  = 22;
+      const subSize   = 16;
+      const lineH     = 20;
+      const smallSize = 12;
+      const smallLH   = 15;
 
-      let y = padding; // topo
+      let y = padding;
 
       // Nome
       ctx.fillStyle = nameColor;
       ctx.textBaseline = 'top';
       ctx.font = `bold ${nameSize}px sans-serif`;
       y = drawTextWrap(ctx, name, textLeft, y, textMaxWidth, lineH) + 6;
+
+      // Departamento
+      if (department) {
+        ctx.fillStyle = normalColor;
+        ctx.font = `${subSize}px sans-serif`;
+        y = drawTextWrap(ctx, department, textLeft, y, textMaxWidth, lineH);
+      }
 
       // Cargo
       ctx.fillStyle = normalColor;
@@ -201,26 +204,29 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
       ctx.font = `bold ${subSize}px sans-serif`;
       y = drawTextWrap(ctx, phone, textLeft, y + 2, textMaxWidth, lineH);
 
-      // Endereço (opcional, como no preview)
-      if (address) {
-        ctx.fillStyle = addressColor;
-        ctx.font = `${addrSize}px sans-serif`;
-        drawTextWrap(ctx, address, textLeft, y + 6, textMaxWidth, addrLineH);
+      // Email (opcional)
+      if (email) {
+        ctx.fillStyle = normalColor;
+        ctx.font = `${subSize}px sans-serif`;
+        y = drawTextWrap(ctx, email, textLeft, y + 2, textMaxWidth, lineH);
       }
 
-      // Adiciona frame
+      // Endereço (opcional)
+      if (address) {
+        ctx.fillStyle = subtleColor;
+        ctx.font = `${smallSize}px sans-serif`;
+        drawTextWrap(ctx, address, textLeft, y + 6, textMaxWidth, smallLH);
+      }
+
       encoder.addFrame(ctx);
     }
 
-    // 7) Finaliza
     encoder.finish();
     console.log(`[ASSINATURA] OK ${BUILD_VERSION}`);
   } catch (error) {
     console.error('[ASSINATURA] ERRO:', error);
     if (!res.headersSent) {
-      res
-        .status(500)
-        .send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
+      res.status(500).send(`Erro interno crítico no servidor ao processar o GIF. Detalhe: ${error.message}`);
     } else {
       console.error('Erro após início do stream; resposta pode estar incompleta.');
     }
@@ -231,17 +237,14 @@ const handleGifGeneration = async (req, res, isTrilha = false) => {
    R O T A S
    ============================================ */
 
-// Outras empresas
-app.post('/generate-gif-signature', (req, res) => handleGifGeneration(req, res, false));
-// Trilha (com QR)
-app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, res, true));
+app.post('/generate-gif-signature', (req, res) => handleGifGeneration(req, res, false)); // outras empresas
+app.post('/generate-trilha-signature', (req, res) => handleGifGeneration(req, res, true)); // trilha (com QR)
 
-// Healthcheck & versão
 app.get('/version', (_req, res) => res.json({ version: BUILD_VERSION }));
 app.get('/', (_req, res) => res.send(`Servidor no ar! build=${BUILD_VERSION}`));
 
 /* ============================================
-   S U B I N D O   S E R V I D O R
+   S T A R T
    ============================================ */
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT} | build=${BUILD_VERSION}`);
