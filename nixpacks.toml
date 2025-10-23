@@ -1,0 +1,5 @@
+# nixpacks.toml
+# Diz ao Railway (via Nixpacks) para instalar o ImageMagick
+[phases.setup]
+nixPkgs = ["...", "imagemagick"] # Mantém pacotes padrão e adiciona imagemagick
+aptPkgs = ["ghostscript"] # Adiciona ghostscript como dependência comum do ImageMagick para fontes
