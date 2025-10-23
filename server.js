@@ -1,6 +1,4 @@
-// --- SERVIDOR ASSINATURAS GIF 635x215 — compatível com o front atual ---
-// Layout 2 colunas, logo/GIF à esquerda (contain, sem upscaling), divisor azul,
-// textos à direita; QR somente na rota Trilha.
+// --- SERVIDOR ASSINATURAS GIF 635x215 — r8 (texto garantido) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -11,7 +9,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const BUILD = '2025-10-23-r7';
+const BUILD = '2025-10-23-r8';
 
 const corsOptions = {
   origin: 'https://octopushelpdesk.com.br',
@@ -44,14 +42,12 @@ const pick = (obj, keys, fallback = '') => {
   return fallback;
 };
 
-// Desenha imagem contida na caixa, sem upscaling (mantém nitidez; evita halo/borda)
 function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
   const s = Math.min(1, Math.min(boxW / img.width, boxH / img.height));
   const dw = Math.round(img.width * s);
   const dh = Math.round(img.height * s);
   const dx = Math.round(boxX + (boxW - dw) / 2);
   const dy = Math.round(boxY + (boxH - dh) / 2);
-
   const prevEnabled = ctx.imageSmoothingEnabled;
   const prevQual = ctx.imageSmoothingQuality;
   ctx.imageSmoothingEnabled = false;
@@ -61,35 +57,48 @@ function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
   ctx.imageSmoothingQuality = prevQual || 'high';
 }
 
-// wrap manual (não usamos o parâmetro maxWidth do fillText para evitar “sumir” texto)
-function drawWrapped(ctx, text, x, y, maxW, lineH) {
+// Desenha texto com wrap + fallback; usa fill e stroke para garantir visibilidade
+function drawTextSafe(ctx, text, x, y, maxW, lineH) {
   if (!text) return y;
-  const words = String(text).split(/\s+/);
-  let line = '';
-  for (let i = 0; i < words.length; i++) {
-    const test = line ? `${line} ${words[i]}` : words[i];
-    if (ctx.measureText(test).width > maxW && i > 0) {
-      ctx.fillText(line, x, y);
-      line = words[i];
-      y += lineH;
-    } else {
-      line = test;
+  const tryWrap = () => {
+    const words = String(text).split(/\s+/);
+    let line = '';
+    for (let i = 0; i < words.length; i++) {
+      const test = line ? `${line} ${words[i]}` : words[i];
+      if (ctx.measureText(test).width > maxW && i > 0) {
+        ctx.fillText(line, x, y);
+        ctx.strokeText(line, x, y); // contorno fino
+        line = words[i];
+        y += lineH;
+      } else {
+        line = test;
+      }
     }
+    ctx.fillText(line, x, y);
+    ctx.strokeText(line, x, y);
+    return y;
+  };
+
+  // se medir ~0, faz fallback sem wrap
+  const m = ctx.measureText(String(text));
+  if (!m || (!m.width || m.width < 0.1)) {
+    ctx.fillText(String(text), x, y);
+    ctx.strokeText(String(text), x, y);
+    return y;
   }
-  ctx.fillText(line, x, y);
-  return y;
+  return tryWrap();
 }
 
 async function makeSignature(req, res, isTrilha) {
   const body = req.body || {};
 
-  // compatível com seu front atual
+  // payload do seu front
   const name   = pick(body, ['name', 'nome'], 'Seu Nome');
   const title  = pick(body, ['title', 'cargo'], 'Seu Cargo');
   const phone  = pick(body, ['phone', 'telefone'], 'Seu Telefone');
   const gifUrl = pick(body, ['gifUrl', 'gif_url', 'gif']);
 
-  // opcionais (o front não envia hoje, mas suportamos)
+  // opcionais (não enviados hoje, mas suportados)
   const department = pick(body, ['department', 'departamento'], '');
   const address = pick(
     body,
@@ -98,7 +107,7 @@ async function makeSignature(req, res, isTrilha) {
   );
   const email = pick(body, ['email', 'e-mail'], '');
 
-  const qrCodeData = body.qrCodeData; // somente Trilha
+  const qrCodeData = body.qrCodeData;
   const outW = Number(body.outWidth) || 635;
   const outH = Number(body.outHeight) || 215;
 
@@ -109,48 +118,39 @@ async function makeSignature(req, res, isTrilha) {
     return res.status(400).send('Erro: qrCodeData é obrigatório para Trilha.');
   }
 
-  // log curto para confirmar que os campos chegaram
   const short = (s) => (s ? String(s).slice(0, 80) : s);
   console.log('[REQ]', {
-    build: BUILD,
-    trilha: isTrilha,
-    out: `${outW}x${outH}`,
-    name: short(name),
-    title: short(title),
-    phone: short(phone),
-    department: short(department),
-    email: short(email),
-    address: short(address),
-    gifUrl: short(gifUrl)
+    build: BUILD, trilha: isTrilha, out: `${outW}x${outH}`,
+    name: short(name), title: short(title), phone: short(phone),
+    department: short(department), email: short(email),
+    address: short(address), gifUrl: short(gifUrl)
   });
 
   try {
-    // 1) baixa GIF
     const r = await fetch(gifUrl);
     if (!r.ok) throw new Error(`Falha ao buscar GIF (${r.status} ${r.statusText})`);
     const gifBuffer = await r.buffer();
 
-    // 2) extrai frames como PNG (evita 'document is not defined')
+    // IMPORTANTÍSSIMO: usar outputType 'png' (evita 'document is not defined')
     const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
 
-    // 3) encoder/canvas
     res.setHeader('Content-Type', 'image/gif');
     const encoder = new GifEncoder(outW, outH, 'neuquant', true);
     encoder.createReadStream().pipe(res);
     encoder.start();
     encoder.setRepeat(0);
-    encoder.setQuality(1); // melhor qualidade
+    encoder.setQuality(1);
 
     const canvas = createCanvas(outW, outH);
     const ctx = canvas.getContext('2d');
 
-    // paleta/typography (coerente com o preview)
+    // Cores e fontes (apenas 'sans-serif' p/ não depender de fontes do SO)
     const nameColor   = isTrilha ? '#0E2923' : '#003366';
     const normalColor = isTrilha ? '#0E2923' : '#555555';
     const subtleColor = '#777777';
 
-    const nameSize  = 16; // preview usa ~16px
+    const nameSize  = 16;
     const subSize   = 13;
     const boldSub   = 13;
     const lineH     = 19;
@@ -164,7 +164,12 @@ async function makeSignature(req, res, isTrilha) {
     const textLeft = dividerX + 12;
     const textAreaRightBase = outW - padding;
 
-    // carrega QR se Trilha
+    // stroke fino para “garantir” o texto visível
+    const useStroke = () => {
+      ctx.lineWidth = 0.8;
+      ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+    };
+
     let qrImage = null;
     if (isTrilha && qrCodeData) {
       qrImage = await loadImage(qrCodeData);
@@ -182,14 +187,14 @@ async function makeSignature(req, res, isTrilha) {
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, outW, outH);
 
-      // logo à esquerda
+      // logo
       drawContainNoUpscale(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
       // divisor
       ctx.fillStyle = '#005A9C';
       ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
 
-      // área de texto (pode reduzir por causa do QR)
+      // área de texto
       let textRight = textAreaRightBase;
 
       // QR (Trilha)
@@ -209,38 +214,44 @@ async function makeSignature(req, res, isTrilha) {
       // Nome
       ctx.fillStyle = nameColor;
       ctx.textBaseline = 'top';
-      ctx.font = `bold ${nameSize}px Arial, sans-serif`;
-      y = drawWrapped(ctx, name, textLeft, y, maxW, lineH) + 6;
+      ctx.font = `bold ${nameSize}px sans-serif`;
+      useStroke();
+      y = drawTextSafe(ctx, name, textLeft, y, maxW, lineH) + 6;
 
       // Departamento (opcional)
       if (department) {
         ctx.fillStyle = normalColor;
-        ctx.font = `${subSize}px Arial, sans-serif`;
-        y = drawWrapped(ctx, department, textLeft, y, maxW, lineH);
+        ctx.font = `${subSize}px sans-serif`;
+        useStroke();
+        y = drawTextSafe(ctx, department, textLeft, y, maxW, lineH);
       }
 
       // Cargo
       ctx.fillStyle = normalColor;
-      ctx.font = `${subSize}px Arial, sans-serif`;
-      y = drawWrapped(ctx, title, textLeft, y, maxW, lineH);
+      ctx.font = `${subSize}px sans-serif`;
+      useStroke();
+      y = drawTextSafe(ctx, title, textLeft, y, maxW, lineH);
 
       // Telefone
       ctx.fillStyle = normalColor;
-      ctx.font = `bold ${boldSub}px Arial, sans-serif`;
-      y = drawWrapped(ctx, phone, textLeft, y + 2, maxW, lineH);
+      ctx.font = `bold ${boldSub}px sans-serif`;
+      useStroke();
+      y = drawTextSafe(ctx, phone, textLeft, y + 2, maxW, lineH);
 
       // Email (se vier)
       if (email) {
         ctx.fillStyle = normalColor;
-        ctx.font = `${subSize}px Arial, sans-serif`;
-        y = drawWrapped(ctx, email, textLeft, y + 2, maxW, lineH);
+        ctx.font = `${subSize}px sans-serif`;
+        useStroke();
+        y = drawTextSafe(ctx, email, textLeft, y + 2, maxW, lineH);
       }
 
-      // Endereço (opcional)
+      // Endereço
       if (address) {
         ctx.fillStyle = subtleColor;
-        ctx.font = `${smallSize}px Arial, sans-serif`;
-        drawWrapped(ctx, address, textLeft, y + 6, maxW, smallLH);
+        ctx.font = `${smallSize}px sans-serif`;
+        useStroke();
+        drawTextSafe(ctx, address, textLeft, y + 6, maxW, smallLH);
       }
 
       encoder.addFrame(ctx);
