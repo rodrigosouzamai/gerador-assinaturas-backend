@@ -1,18 +1,17 @@
 {
-  "name": "signature-generator-backend",
+  "name": "signature-generator-backend-imagemagick",
   "version": "1.0.0",
-  "description": "Servidor para gerar assinaturas de e-mail animadas.",
+  "description": "Servidor para gerar assinaturas de e-mail animadas usando ImageMagick.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "author": "Gemini & Rodrigo Souza",
+  "license": "ISC",
   "dependencies": {
-    "@napi-rs/canvas": "^0.1.52",
     "cors": "^2.8.5",
     "express": "^4.19.2",
-    "gif-encoder-2": "^1.0.5",
-    "gif-frames": "^1.0.1",
+    "gm": "^1.25.0",
     "node-fetch": "^2.7.0"
   }
 }
-
