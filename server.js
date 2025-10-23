@@ -1,4 +1,4 @@
-// --- SERVIDOR ASSINATURAS GIF — r10 DIAG (Diagnóstico de Desenho) ---
+// --- SERVIDOR ASSINATURAS GIF — r10 DIAG (Diagnóstico Focado no Desenho) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,7 +9,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 8080; // Railway define a porta via env
-const BUILD = '2025-10-23-r10-DIAG'; // Nova versão de build
+const BUILD = '2025-10-23-r10-DIAG-DRAW'; // Nova versão de build
 
 const corsOptions = {
   origin: 'https://octopushelpdesk.com.br',
@@ -42,20 +42,28 @@ const pick = (obj, keys, fallback = '') => {
   return fallback;
 };
 
+// Desenha imagem dentro da caixa, mantendo proporção, sem aumentar (contain)
 function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
   const imgW = img.width || 1;
   const imgH = img.height || 1;
-  if (boxW <= 0 || boxH <= 0 || imgW <= 0 || imgH <= 0) return;
+  if (boxW <= 0 || boxH <= 0 || imgW <= 0 || imgH <= 0) return; // Evita erros
   const s = Math.min(1, Math.min(boxW / imgW, boxH / imgH));
   const dw = Math.round(imgW * s);
   const dh = Math.round(imgH * s);
   const dx = Math.round(boxX + (boxW - dw) / 2);
   const dy = Math.round(boxY + (boxH - dh) / 2);
+
   try {
-    ctx.imageSmoothingEnabled = false;
+    const prevEnabled = ctx.imageSmoothingEnabled;
+    const prevQual = ctx.imageSmoothingQuality;
+    ctx.imageSmoothingEnabled = false; // Sem suavização para GIFs
     ctx.imageSmoothingQuality = 'low';
     ctx.drawImage(img, dx, dy, dw, dh);
-  } catch (e) { console.error("Erro em drawImage:", e.message); }
+    ctx.imageSmoothingEnabled = prevEnabled;
+    ctx.imageSmoothingQuality = prevQual || 'high';
+  } catch (e) {
+      console.error("[DIAG DRAW] Erro em drawImage:", e.message);
+  }
 }
 
 // ---------- Lógica Principal ----------
@@ -63,12 +71,11 @@ async function makeSignature(req, res, isTrilha) {
   const body = req.body || {};
 
   // Extrai dados
-  const name   = pick(body, ['name', 'nome'], 'Nome Teste'); // Fallback mais visível
-  const title  = pick(body, ['title', 'cargo'], 'Cargo Teste');
-  const phone  = pick(body, ['phone', 'telefone'], '(00) 00000-0000');
+  const name   = pick(body, ['name', 'nome'], 'Nome Teste Diag'); // Fallback mais visível
+  const title  = pick(body, ['title', 'cargo'], 'Cargo Teste Diag');
+  const phone  = pick(body, ['phone', 'telefone'], '(99) 99999-9999');
   const gifUrl = pick(body, ['gifUrl', 'gif_url', 'gif']);
-  // Ignora department, address, email por agora para simplificar
-  const qrCodeData = body.qrCodeData;
+  const qrCodeData = body.qrCodeData; // Para Trilha
 
   // Tamanho de Saída Fixo
   const outW = 635;
@@ -83,21 +90,21 @@ async function makeSignature(req, res, isTrilha) {
   }
 
   const short = (s) => (s ? String(s).slice(0, 80) : s);
-  console.log('[REQ DIAG]', { build: BUILD, trilha: isTrilha, name: short(name), gifUrl: short(gifUrl) });
+  console.log('[REQ DIAG DRAW]', { build: BUILD, trilha: isTrilha, name: short(name), gifUrl: short(gifUrl) });
 
   try {
     // 1. Baixa GIF
-    console.log('[DIAG] Baixando GIF...');
+    console.log('[DIAG DRAW] Baixando GIF...');
     const r = await fetch(gifUrl);
     if (!r.ok) throw new Error(`Falha ao buscar GIF (${r.status} ${r.statusText})`);
     const gifBuffer = await r.buffer();
-    console.log('[DIAG] GIF baixado.');
+    console.log('[DIAG DRAW] GIF baixado.');
 
     // 2. Extrai Frames (como PNG)
-    console.log('[DIAG] Extraindo frames...');
+    console.log('[DIAG DRAW] Extraindo frames...');
     const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
-    console.log(`[DIAG] ${frames.length} frames extraídos.`);
+    console.log(`[DIAG DRAW] ${frames.length} frames extraídos.`);
 
     // 3. Configura Encoder e Resposta
     res.setHeader('Content-Type', 'image/gif');
@@ -109,42 +116,29 @@ async function makeSignature(req, res, isTrilha) {
 
     const canvas = createCanvas(outW, outH);
     const ctx = canvas.getContext('2d');
-    console.log('[DIAG] Canvas e Encoder configurados.');
+    console.log('[DIAG DRAW] Canvas e Encoder configurados.');
 
     // 4. Layout Fixo Simplificado (Ajustado para 635x215)
     const padding = 20;
     const leftColW = 240;
     const dividerX = leftColW;
-    const textLeft = dividerX + 30; // Posição X inicial do texto (mais para a direita)
-    let textAreaRight = outW - padding;
-
-    // Fontes Grandes Fixas
-    const nameSize  = 30; // Bem grande
-    const subSize   = 24; // Grande
-    const lineH     = 35; // Espaço grande
-
-    // Cores Contraste
-    const textColor = '#000000'; // Preto para garantir visibilidade
 
     // QR Code (Trilha)
     let qrImage = null;
     let qrSize = 0, qrX = 0, qrY = 0;
     if (isTrilha && qrCodeData) {
       try {
-        console.log('[DIAG] Carregando QR Code...');
+        console.log('[DIAG DRAW] Carregando QR Code...');
         qrImage = await loadImage(qrCodeData);
         qrSize = 130; // Tamanho fixo grande
         qrX = outW - padding - qrSize;
         qrY = (outH - qrSize) / 2;
-        textAreaRight = qrX - 20;
-        console.log('[DIAG] QR Code carregado.');
-      } catch(e) { console.error("[DIAG] Erro ao carregar QR Code:", e.message); }
+        console.log('[DIAG DRAW] QR Code carregado.');
+      } catch(e) { console.error("[DIAG DRAW] Erro ao carregar QR Code:", e.message); }
     }
 
-    const maxTextWidth = Math.max(50, textAreaRight - textLeft);
-
     // 5. Processa cada Frame
-    console.log('[DIAG] Iniciando processamento de frames...');
+    console.log('[DIAG DRAW] Iniciando processamento de frames...');
     let frameCount = 0;
     for (const f of frames) {
       frameCount++;
@@ -170,58 +164,63 @@ async function makeSignature(req, res, isTrilha) {
 
       // Desenha QR (se Trilha)
       if (isTrilha && qrImage) {
-        console.log(`[DIAG Frame ${frameCount}] Desenhando QR...`);
+        console.log(`[DIAG DRAW Frame ${frameCount}] Desenhando QR...`);
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(qrX - 5, qrY - 5, qrSize + 10, qrSize + 10);
         ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
       }
 
-      // --- DESENHO DE TEXTO SIMPLIFICADO ---
-      let currentY = 50; // Começa fixo em Y=50
-      ctx.fillStyle = textColor;
+      // --- DESENHO DE TEXTO PARA DIAGNÓSTICO ---
+      let currentY = 50;           // Posição Y inicial FIXA
+      const textLeftDiag = 280;    // Posição X inicial FIXA
+      const maxWDiag = 300;        // Largura máxima FIXA
+      const lineHDiag = 35;        // Altura linha FIXA
+      const nameSizeDiag = 28;     // Tamanho Nome FIXO
+      const subSizeDiag = 22;      // Tamanho Subtexto FIXO
+      ctx.fillStyle = '#000000'; // Preto FIXO
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
 
       // Nome
       try {
-          ctx.font = `bold ${nameSize}px sans-serif`;
-          console.log(`[DIAG Frame ${frameCount}] Desenhando Nome: ${name} em ${textLeft},${currentY} (Fonte: ${ctx.font})`);
-          ctx.fillText(name, textLeft, currentY, maxTextWidth);
-          currentY += lineH; // Próxima linha
-      } catch (e) { console.error(`[DIAG Frame ${frameCount}] Erro ao desenhar Nome:`, e.message); }
+          ctx.font = `bold ${nameSizeDiag}px sans-serif`;
+          console.log(`[DIAG DRAW Frame ${frameCount}] Tentando desenhar Nome: ${name} em ${textLeftDiag},${currentY} (Fonte: ${ctx.font})`);
+          ctx.fillText(name, textLeftDiag, currentY, maxWDiag);
+          currentY += lineHDiag;
+      } catch (e) { console.error(`[DIAG DRAW Frame ${frameCount}] Erro ao desenhar Nome:`, e.message); }
 
       // Cargo
       try {
-          ctx.font = `${subSize}px sans-serif`;
-          console.log(`[DIAG Frame ${frameCount}] Desenhando Cargo: ${title} em ${textLeft},${currentY} (Fonte: ${ctx.font})`);
-          ctx.fillText(title, textLeft, currentY, maxTextWidth);
-          currentY += lineH; // Próxima linha
-      } catch (e) { console.error(`[DIAG Frame ${frameCount}] Erro ao desenhar Cargo:`, e.message); }
+          ctx.font = `${subSizeDiag}px sans-serif`;
+          console.log(`[DIAG DRAW Frame ${frameCount}] Tentando desenhar Cargo: ${title} em ${textLeftDiag},${currentY} (Fonte: ${ctx.font})`);
+          ctx.fillText(title, textLeftDiag, currentY, maxWDiag);
+          currentY += lineHDiag;
+      } catch (e) { console.error(`[DIAG DRAW Frame ${frameCount}] Erro ao desenhar Cargo:`, e.message); }
 
       // Telefone
       try {
-          ctx.font = `bold ${subSize}px sans-serif`;
-          console.log(`[DIAG Frame ${frameCount}] Desenhando Telefone: ${phone} em ${textLeft},${currentY} (Fonte: ${ctx.font})`);
-          ctx.fillText(phone, textLeft, currentY, maxTextWidth);
-      } catch (e) { console.error(`[DIAG Frame ${frameCount}] Erro ao desenhar Telefone:`, e.message); }
-      // --- FIM DESENHO DE TEXTO SIMPLIFICADO ---
+          ctx.font = `bold ${subSizeDiag}px sans-serif`;
+          console.log(`[DIAG DRAW Frame ${frameCount}] Tentando desenhar Telefone: ${phone} em ${textLeftDiag},${currentY} (Fonte: ${ctx.font})`);
+          ctx.fillText(phone, textLeftDiag, currentY, maxWDiag);
+      } catch (e) { console.error(`[DIAG DRAW Frame ${frameCount}] Erro ao desenhar Telefone:`, e.message); }
+      // --- FIM DESENHO DE TEXTO PARA DIAGNÓSTICO ---
 
       // Adiciona frame ao encoder
       encoder.addFrame(ctx);
     }
-    console.log(`[DIAG] ${frameCount} frames processados.`);
+    console.log(`[DIAG DRAW] ${frameCount} frames processados.`);
 
     // 6. Finaliza
-    console.log('[DIAG] Finalizando GIF...');
+    console.log('[DIAG DRAW] Finalizando GIF...');
     encoder.finish();
-    console.log('[DIAG] Processamento concluído.');
+    console.log('[DIAG DRAW] Processamento concluído.');
 
   } catch (e) {
-    console.error('[DIAG] ERRO GERAL:', e.message, e.stack);
+    console.error('[DIAG DRAW] ERRO GERAL:', e.message, e.stack);
     if (!res.headersSent) {
-      res.status(500).send(`Erro interno (DIAG). Detalhe: ${e.message}`);
+      res.status(500).send(`Erro interno (DIAG DRAW). Detalhe: ${e.message}`);
     } else {
-       console.error('[DIAG] Erro após início do stream.');
+       console.error('[DIAG DRAW] Erro após início do stream.');
        if (!res.writableEnded) res.end();
     }
   }
@@ -232,8 +231,8 @@ app.post('/generate-gif-signature', (req, res) => makeSignature(req, res, false)
 app.post('/generate-trilha-signature', (req, res) => makeSignature(req, res, true));
 
 app.get('/version', (_req, res) => res.json({ build: BUILD }));
-// Root (vRAILWAY-DRAWDIAG) - Nova versão para prova
-app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-DRAWDIAG está no ar!`));
+// Root (vRAILWAY-DRAWDIAG-R10) - Nova versão para prova
+app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-DRAWDIAG-R10 está no ar!`));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT} | build=${BUILD}`);
