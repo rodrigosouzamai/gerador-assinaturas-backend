@@ -1,5 +1,6 @@
-// --- SERVIDOR PARA GERAR ASSINATURAS GIF (COMPATÍVEL COM O FRONT ATUAL) ---
-// Saída padrão: 635x215 | layout em 2 colunas | GIF/Logo à esquerda (contain sem upscaling)
+// --- SERVIDOR ASSINATURAS GIF 635x215 — compatível com o front atual ---
+// Layout 2 colunas, logo/GIF à esquerda (contain, sem upscaling), divisor azul,
+// textos à direita; QR somente na rota Trilha.
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,11 +10,11 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const BUILD_VERSION = '2025-10-22-front-sync';
+const PORT = process.env.PORT || 8080;
+const BUILD = '2025-10-23-r7';
 
 const corsOptions = {
-  origin: 'https://octopushelpdesk.com.br', // mantenha restrito ao seu domínio
+  origin: 'https://octopushelpdesk.com.br',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   optionsSuccessStatus: 200
@@ -43,11 +44,9 @@ const pick = (obj, keys, fallback = '') => {
   return fallback;
 };
 
-// desenha imagem contida na caixa, sem upscaling (mantém nitidez; evita "borda")
+// Desenha imagem contida na caixa, sem upscaling (mantém nitidez; evita halo/borda)
 function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
-  const scaleW = boxW / img.width;
-  const scaleH = boxH / img.height;
-  const s = Math.min(1, Math.min(scaleW, scaleH)); // nunca > 1
+  const s = Math.min(1, Math.min(boxW / img.width, boxH / img.height));
   const dw = Math.round(img.width * s);
   const dh = Math.round(img.height * s);
   const dx = Math.round(boxX + (boxW - dw) / 2);
@@ -57,58 +56,85 @@ function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
   const prevQual = ctx.imageSmoothingQuality;
   ctx.imageSmoothingEnabled = false;
   ctx.imageSmoothingQuality = 'low';
-
   ctx.drawImage(img, dx, dy, dw, dh);
-
   ctx.imageSmoothingEnabled = prevEnabled;
   ctx.imageSmoothingQuality = prevQual || 'high';
 }
 
-// ---------- core ----------
-async function generateSignature(req, res, isTrilha) {
+// wrap manual (não usamos o parâmetro maxWidth do fillText para evitar “sumir” texto)
+function drawWrapped(ctx, text, x, y, maxW, lineH) {
+  if (!text) return y;
+  const words = String(text).split(/\s+/);
+  let line = '';
+  for (let i = 0; i < words.length; i++) {
+    const test = line ? `${line} ${words[i]}` : words[i];
+    if (ctx.measureText(test).width > maxW && i > 0) {
+      ctx.fillText(line, x, y);
+      line = words[i];
+      y += lineH;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, y);
+  return y;
+}
+
+async function makeSignature(req, res, isTrilha) {
   const body = req.body || {};
 
-  // Compatível com o seu front **atual**
-  const name    = pick(body, ['name', 'nome'],           'Seu Nome');
-  const title   = pick(body, ['title', 'cargo'],         'Seu Cargo');
-  const phone   = pick(body, ['phone', 'telefone'],      'Seu Telefone');
-  const gifUrl  = pick(body, ['gifUrl', 'gif_url', 'gif']);
+  // compatível com seu front atual
+  const name   = pick(body, ['name', 'nome'], 'Seu Nome');
+  const title  = pick(body, ['title', 'cargo'], 'Seu Cargo');
+  const phone  = pick(body, ['phone', 'telefone'], 'Seu Telefone');
+  const gifUrl = pick(body, ['gifUrl', 'gif_url', 'gif']);
 
-  // Campos opcionais (não enviados pelo front atual, mas suportados):
+  // opcionais (o front não envia hoje, mas suportamos)
   const department = pick(body, ['department', 'departamento'], '');
-  const address    = pick(
+  const address = pick(
     body,
     ['address', 'endereco', 'endereço'],
     'Setor SRPN - Estadio Mané Garrincha Raio 46/47 Cep: 70070-701 - Camarote Vip 09. Brasilia - DF. Brasil'
   );
-  const email      = pick(body, ['email', 'e-mail'], '');
+  const email = pick(body, ['email', 'e-mail'], '');
 
-  // QR somente para Trilha
-  const qrCodeData = body.qrCodeData;
-
-  // Tamanho final (default 635x215) — pode ser sobrescrito pelo front no futuro
-  const outW = Number(body.outWidth)  || 635;
+  const qrCodeData = body.qrCodeData; // somente Trilha
+  const outW = Number(body.outWidth) || 635;
   const outH = Number(body.outHeight) || 215;
 
-  // Validação mínima
   if (!gifUrl || !name || !title || !phone) {
-    return res.status(400).send('Erro: envie ao menos name, title, phone e gifUrl.');
+    return res.status(400).send('Erro: envie name, title, phone e gifUrl.');
   }
   if (isTrilha && !qrCodeData) {
-    return res.status(400).send('Erro: qrCodeData é obrigatório para a assinatura Trilha.');
+    return res.status(400).send('Erro: qrCodeData é obrigatório para Trilha.');
   }
 
+  // log curto para confirmar que os campos chegaram
+  const short = (s) => (s ? String(s).slice(0, 80) : s);
+  console.log('[REQ]', {
+    build: BUILD,
+    trilha: isTrilha,
+    out: `${outW}x${outH}`,
+    name: short(name),
+    title: short(title),
+    phone: short(phone),
+    department: short(department),
+    email: short(email),
+    address: short(address),
+    gifUrl: short(gifUrl)
+  });
+
   try {
-    // 1) baixa gif fonte
+    // 1) baixa GIF
     const r = await fetch(gifUrl);
     if (!r.ok) throw new Error(`Falha ao buscar GIF (${r.status} ${r.statusText})`);
     const gifBuffer = await r.buffer();
 
-    // 2) extrai frames como PNG (evita uso de DOM/document)
+    // 2) extrai frames como PNG (evita 'document is not defined')
     const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
 
-    // 3) encoder/canvas no tamanho final
+    // 3) encoder/canvas
     res.setHeader('Content-Type', 'image/gif');
     const encoder = new GifEncoder(outW, outH, 'neuquant', true);
     encoder.createReadStream().pipe(res);
@@ -119,30 +145,30 @@ async function generateSignature(req, res, isTrilha) {
     const canvas = createCanvas(outW, outH);
     const ctx = canvas.getContext('2d');
 
-    // 4) carrega QR se for Trilha
-    let qrImage = null;
-    if (isTrilha && qrCodeData) {
-      qrImage = await loadImage(qrCodeData);
-    }
-
-    // 5) layout base (duas colunas)
-    const padding = 16;
-    const leftColW = 220;       // área do GIF/Logo
-    const dividerX = leftColW;  // divisória azul
-    const textLeft = dividerX + 12;
-    const textAreaRightBase = outW - padding;
-
-    // paleta/typography
+    // paleta/typography (coerente com o preview)
     const nameColor   = isTrilha ? '#0E2923' : '#003366';
     const normalColor = isTrilha ? '#0E2923' : '#555555';
     const subtleColor = '#777777';
 
-    const nameSize  = 16; // combinar com preview do HTML
+    const nameSize  = 16; // preview usa ~16px
     const subSize   = 13;
     const boldSub   = 13;
     const lineH     = 19;
     const smallSize = 11;
     const smallLH   = 15;
+
+    // layout
+    const padding = 16;
+    const leftColW = 220;
+    const dividerX = leftColW;
+    const textLeft = dividerX + 12;
+    const textAreaRightBase = outW - padding;
+
+    // carrega QR se Trilha
+    let qrImage = null;
+    if (isTrilha && qrCodeData) {
+      qrImage = await loadImage(qrCodeData);
+    }
 
     for (const f of frames) {
       const delayMs = (f.frameInfo?.delay ?? 10) * 10;
@@ -151,22 +177,22 @@ async function generateSignature(req, res, isTrilha) {
       const frameBuf = await streamToBuffer(f.getImage());
       const frameImg = await loadImage(frameBuf);
 
-      // fundo branco
+      // fundo
       ctx.clearRect(0, 0, outW, outH);
       ctx.fillStyle = '#FFFFFF';
       ctx.fillRect(0, 0, outW, outH);
 
-      // GIF/Logo à esquerda (sem upscaling)
+      // logo à esquerda
       drawContainNoUpscale(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
-      // divisória azul
+      // divisor
       ctx.fillStyle = '#005A9C';
       ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
 
-      // área de texto (pode encolher se houver QR)
-      let textAreaRight = textAreaRightBase;
+      // área de texto (pode reduzir por causa do QR)
+      let textRight = textAreaRightBase;
 
-      // QR na direita (somente Trilha)
+      // QR (Trilha)
       if (isTrilha && qrImage) {
         const qrSize = Math.min(110, outH - padding * 2);
         const qrX = outW - padding - qrSize;
@@ -174,85 +200,69 @@ async function generateSignature(req, res, isTrilha) {
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(qrX - 6, qrY - 6, qrSize + 12, qrSize + 12);
         ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
-        textAreaRight = qrX - 12;
+        textRight = qrX - 12;
       }
 
-      // textos à direita
-      const maxW = Math.max(40, textAreaRight - textLeft);
+      const maxW = Math.max(40, textRight - textLeft);
       let y = padding;
 
-      // Nome (bold, 16px, #003366 no preview)
+      // Nome
       ctx.fillStyle = nameColor;
       ctx.textBaseline = 'top';
       ctx.font = `bold ${nameSize}px Arial, sans-serif`;
-      ctx.fillText(name, textLeft, y, maxW);
-      y += lineH;
+      y = drawWrapped(ctx, name, textLeft, y, maxW, lineH) + 6;
 
-      // Departamento (13px cinza, se vier)
+      // Departamento (opcional)
       if (department) {
         ctx.fillStyle = normalColor;
         ctx.font = `${subSize}px Arial, sans-serif`;
-        ctx.fillText(department, textLeft, y, maxW);
-        y += lineH;
+        y = drawWrapped(ctx, department, textLeft, y, maxW, lineH);
       }
 
-      // Cargo (13px cinza)
+      // Cargo
       ctx.fillStyle = normalColor;
       ctx.font = `${subSize}px Arial, sans-serif`;
-      ctx.fillText(title, textLeft, y, maxW);
-      y += lineH;
+      y = drawWrapped(ctx, title, textLeft, y, maxW, lineH);
 
-      // Telefone (13px bold)
+      // Telefone
+      ctx.fillStyle = normalColor;
       ctx.font = `bold ${boldSub}px Arial, sans-serif`;
-      ctx.fillText(phone, textLeft, y, maxW);
-      y += lineH;
+      y = drawWrapped(ctx, phone, textLeft, y + 2, maxW, lineH);
 
-      // Email (opcional)
+      // Email (se vier)
       if (email) {
+        ctx.fillStyle = normalColor;
         ctx.font = `${subSize}px Arial, sans-serif`;
-        ctx.fillText(email, textLeft, y, maxW);
-        y += lineH;
+        y = drawWrapped(ctx, email, textLeft, y + 2, maxW, lineH);
       }
 
-      // Endereço (11px cinza claro multi-linha — mesmo texto do preview se não vier no body)
+      // Endereço (opcional)
       if (address) {
         ctx.fillStyle = subtleColor;
         ctx.font = `${smallSize}px Arial, sans-serif`;
-        // wrap simples
-        const words = address.split(/\s+/);
-        let line = '';
-        for (const w of words) {
-          const test = line ? `${line} ${w}` : w;
-          if (ctx.measureText(test).width > maxW) {
-            ctx.fillText(line, textLeft, y, maxW);
-            line = w;
-            y += smallLH;
-          } else {
-            line = test;
-          }
-        }
-        if (line) ctx.fillText(line, textLeft, y, maxW);
+        drawWrapped(ctx, address, textLeft, y + 6, maxW, smallLH);
       }
 
       encoder.addFrame(ctx);
     }
 
     encoder.finish();
-    console.log(`[ASSINATURA] OK ${BUILD_VERSION}`);
-  } catch (err) {
-    console.error('[ASSINATURA] ERRO:', err);
+    console.log('[ASSINATURA] OK', BUILD);
+  } catch (e) {
+    console.error('ERRO', e);
     if (!res.headersSent) {
-      res.status(500).send(`Erro interno ao processar o GIF. Detalhe: ${err.message}`);
+      res.status(500).send(`Erro interno ao processar o GIF. Detalhe: ${e.message}`);
     }
   }
 }
 
 // ---------- rotas ----------
-app.post('/generate-gif-signature', (req, res) => generateSignature(req, res, false));
-app.post('/generate-trilha-signature', (req, res) => generateSignature(req, res, true));
-app.get('/version', (_req, res) => res.json({ version: BUILD_VERSION }));
-app.get('/', (_req, res) => res.send(`Servidor no ar! build=${BUILD_VERSION}`));
+app.post('/generate-gif-signature', (req, res) => makeSignature(req, res, false));
+app.post('/generate-trilha-signature', (req, res) => makeSignature(req, res, true));
+
+app.get('/version', (_req, res) => res.json({ build: BUILD }));
+app.get('/', (_req, res) => res.send(`Servidor no ar | build=${BUILD}`));
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Servidor rodando na porta ${PORT} | build=${BUILD_VERSION}`);
+  console.log(`Servidor rodando na porta ${PORT} | build=${BUILD}`);
 });
