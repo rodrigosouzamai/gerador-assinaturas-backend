@@ -1,21 +1,25 @@
-// --- SERVIDOR ASSINATURAS GIF — r14 FINAL ATTEMPT (Canvas Fixo + Desenho Simples em PNG Frames) ---
+// servidor de assinaturas GIF (635x215) — base gifuct-js + @napi-rs/canvas
+// - Compatível com o payload do seu front:
+//   { name, title, phone, gifUrl, (qrCodeData se Trilha), department?, address?, email?, outWidth?, outHeight? }
+// - Layout: logo/GIF à esquerda, divisor azul, textos à direita; QR à direita (Trilha)
 
 const express = require('express');
-const { createCanvas, loadImage } = require('@napi-rs/canvas');
-const gifFrames = require('gif-frames');
-const GifEncoder = require('gif-encoder-2');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const { createCanvas, loadImage, ImageData, registerFont } = require('@napi-rs/canvas');
+const GifEncoder = require('gif-encoder-2');
+const { parseGIF, decompressFrames } = require('gifuct-js');
 
 const app = express();
-const PORT = process.env.PORT || 8080; // Railway define a porta via env
-const BUILD = '2025-10-23-r14-FINAL-ATTEMPT'; // Nova versão de build
+const PORT = process.env.PORT || 8080;
+const BUILD = '2025-10-23-final-gifuct';
 
+// --- CORS (restrito ao seu domínio) ---
 const corsOptions = {
   origin: 'https://octopushelpdesk.com.br',
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
-  optionsSuccessStatus: 200
+  optionsSuccessStatus: 200,
 };
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -23,65 +27,101 @@ app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ---------- helpers ----------
-const streamToBuffer = (stream) =>
-  new Promise((resolve, reject) => {
-    const chunks = [];
-    stream.on('data', (c) => chunks.push(c));
-    stream.on('end', () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
+// --- Fonte (melhor compatibilidade em containers) ---
+try {
+  registerFont('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', { family: 'DejaVuSans' });
+  console.log('[FONT] DejaVuSans registrada');
+} catch {
+  console.log('[FONT] DejaVuSans não disponível; usando sans-serif padrão');
+}
 
+// ----------------- helpers -----------------
 const pick = (obj, keys, fallback = '') => {
   for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== null) {
-      const v = String(obj[k]).trim();
-      if (v !== '') return v;
-    }
+    if (obj[k] != null && String(obj[k]).trim() !== '') return String(obj[k]).trim();
   }
   return fallback;
 };
 
-// Desenha imagem dentro da caixa, mantendo proporção, sem aumentar (contain)
+// Desenha imagem contida na caixa, sem upscaling (evita halo/borda)
 function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
-  const imgW = img.width || 1;
-  const imgH = img.height || 1;
-  if (boxW <= 0 || boxH <= 0 || imgW <= 0 || imgH <= 0) return; // Evita erros
-  const s = Math.min(1, Math.min(boxW / imgW, boxH / imgH));
-  const dw = Math.round(imgW * s);
-  const dh = Math.round(imgH * s);
+  const s = Math.min(1, Math.min(boxW / img.width, boxH / img.height));
+  const dw = Math.round(img.width * s);
+  const dh = Math.round(img.height * s);
   const dx = Math.round(boxX + (boxW - dw) / 2);
   const dy = Math.round(boxY + (boxH - dh) / 2);
 
-  try {
-    const prevEnabled = ctx.imageSmoothingEnabled;
-    const prevQual = ctx.imageSmoothingQuality;
-    ctx.imageSmoothingEnabled = false; // Sem suavização para GIFs
-    ctx.imageSmoothingQuality = 'low';
-    ctx.drawImage(img, dx, dy, dw, dh);
-    ctx.imageSmoothingEnabled = prevEnabled;
-    ctx.imageSmoothingQuality = prevQual || 'high';
-  } catch (e) {
-      console.error("[FINAL ATTEMPT] Erro em drawImage:", e.message);
+  const prevEnabled = ctx.imageSmoothingEnabled;
+  const prevQual = ctx.imageSmoothingQuality;
+  ctx.imageSmoothingEnabled = false;
+  ctx.imageSmoothingQuality = 'low';
+  ctx.drawImage(img, dx, dy, dw, dh);
+  ctx.imageSmoothingEnabled = prevEnabled;
+  ctx.imageSmoothingQuality = prevQual || 'high';
+}
+
+// Wrap manual (não usamos maxWidth direto no fillText)
+function drawWrapped(ctx, text, x, y, maxW, lineH) {
+  if (!text) return y;
+  const words = String(text).split(/\s+/);
+  let line = '';
+  for (let i = 0; i < words.length; i++) {
+    const test = line ? `${line} ${words[i]}` : words[i];
+    if (ctx.measureText(test).width > maxW && i > 0) {
+      ctx.fillText(line, x, y); ctx.strokeText(line, x, y);
+      line = words[i];
+      y += lineH;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, y); ctx.strokeText(line, x, y);
+  return y;
+}
+
+// Aplica o patch RGBA do frame (gifuct-js) na tela composta de origem
+function blitFramePatch(ctx, frame) {
+  const { dims, patch } = frame; // dims: {left, top, width, height}
+  const imageData = new ImageData(Uint8ClampedArray.from(patch), dims.width, dims.height);
+  ctx.putImageData(imageData, dims.left, dims.top);
+}
+
+// Trata descarte entre frames
+function handleDisposal(ctx, prevFrame) {
+  if (!prevFrame) return;
+  const disposal = prevFrame.disposalType || 0;
+  if (disposal === 2) {
+    const { dims } = prevFrame;
+    ctx.clearRect(dims.left, dims.top, dims.width, dims.height);
+  } else if (disposal === 3) {
+    // Fallback simples: limpa tudo (suficiente para a maioria dos GIFs)
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   }
 }
 
-// ---------- Lógica Principal ----------
-async function makeSignature(req, res, isTrilha) {
+// ----------------- core -----------------
+async function buildSignature(req, res, isTrilha) {
   const body = req.body || {};
 
-  // Extrai dados
-  const name   = pick(body, ['name', 'nome'], 'Nome Teste Final'); // Fallback visível
-  const title  = pick(body, ['title', 'cargo'], 'Cargo Teste Final');
-  const phone  = pick(body, ['phone', 'telefone'], '(00) 00000-0000');
+  // Campos do seu front (obrigatórios)
+  const name   = pick(body, ['name', 'nome'], 'Seu Nome');
+  const title  = pick(body, ['title', 'cargo'], 'Seu Cargo');
+  const phone  = pick(body, ['phone', 'telefone'], 'Seu Telefone');
   const gifUrl = pick(body, ['gifUrl', 'gif_url', 'gif']);
-  const qrCodeData = body.qrCodeData; // Para Trilha
 
-  // Tamanho de Saída Fixo
-  const outW = 635;
-  const outH = 215;
+  // Opcionais (preview tem; front pode enviar depois)
+  const department = pick(body, ['department', 'departamento'], '');
+  const email      = pick(body, ['email', 'e-mail'], '');
+  const address    = pick(
+    body,
+    ['address', 'endereco', 'endereço'],
+    'Setor SRPN - Estadio Mané Garrincha Raio 46/47 Cep: 70070-701 - Camarote Vip 09. Brasilia - DF. Brasil'
+  );
 
-  // Validações
+  const qrCodeData = body.qrCodeData; // somente Trilha
+  const outW = Number(body.outWidth)  || 635;
+  const outH = Number(body.outHeight) || 215;
+
   if (!gifUrl || !name || !title || !phone) {
     return res.status(400).send('Erro: envie name, title, phone e gifUrl.');
   }
@@ -89,150 +129,171 @@ async function makeSignature(req, res, isTrilha) {
     return res.status(400).send('Erro: qrCodeData é obrigatório para Trilha.');
   }
 
-  const short = (s) => (s ? String(s).slice(0, 80) : s);
-  console.log('[REQ FINAL ATTEMPT]', { build: BUILD, trilha: isTrilha, name: short(name), gifUrl: short(gifUrl) });
+  const short = (s) => (s ? String(s).slice(0, 90) : s);
+  console.log('[REQ]', {
+    build: BUILD, trilha: isTrilha, out: `${outW}x${outH}`,
+    name: short(name), title: short(title), phone: short(phone),
+    department: short(department), email: short(email), address: short(address),
+    gifUrl: short(gifUrl)
+  });
 
   try {
-    // 1. Baixa GIF
-    console.log('[FINAL ATTEMPT] Baixando GIF...');
+    // 1) baixa GIF como ArrayBuffer
     const r = await fetch(gifUrl);
     if (!r.ok) throw new Error(`Falha ao buscar GIF (${r.status} ${r.statusText})`);
-    const gifBuffer = await r.buffer();
-    console.log('[FINAL ATTEMPT] GIF baixado.');
+    const buf = Buffer.from(await r.arrayBuffer());
 
-    // 2. Extrai Frames (IMPORTANTE: como PNG)
-    console.log('[FINAL ATTEMPT] Extraindo frames como PNG...');
-    const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
-    if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
-    console.log(`[FINAL ATTEMPT] ${frames.length} frames extraídos.`);
+    // 2) parse/decodificação
+    const parsed = parseGIF(buf);
+    const frames = decompressFrames(parsed, true); // true => gera patch RGBA
+    const gifW = parsed.lsd.width;
+    const gifH = parsed.lsd.height;
 
-    // 3. Configura Encoder e Resposta
+    // 3) encoder final
     res.setHeader('Content-Type', 'image/gif');
-    const encoder = new GifEncoder(outW, outH, 'neuquant', true); // Usa tamanho fixo
+    const encoder = new GifEncoder(outW, outH, 'neuquant', true);
     encoder.createReadStream().pipe(res);
     encoder.start();
     encoder.setRepeat(0);
-    encoder.setQuality(10);
+    encoder.setQuality(1); // melhor qualidade
 
-    const canvas = createCanvas(outW, outH); // Usa tamanho fixo
-    const ctx = canvas.getContext('2d');
-    console.log('[FINAL ATTEMPT] Canvas e Encoder configurados.');
+    // 4) canvas
+    //    - srcCanvas no tamanho do GIF de origem (onde compomos frame por frame)
+    //    - outCanvas no tamanho final (layout 635x215)
+    const srcCanvas = createCanvas(gifW, gifH);
+    const srcCtx = srcCanvas.getContext('2d');
 
-    // 4. Layout Fixo Simplificado (Ajustado para 635x215)
-    const padding = 20;
-    const leftColW = 240;
+    const outCanvas = createCanvas(outW, outH);
+    const outCtx = outCanvas.getContext('2d');
+
+    // 5) layout do cartão
+    const padding = 16;
+    const leftColW = 220;
     const dividerX = leftColW;
+    const textLeft = dividerX + 12;
 
-    // QR Code (Trilha)
+    const nameColor   = isTrilha ? '#0E2923' : '#003366';
+    const normalColor = isTrilha ? '#0E2923' : '#555555';
+    const subtleColor = '#777777';
+
+    const nameSize  = 16;
+    const subSize   = 13;
+    const boldSub   = 13;
+    const lineH     = 19;
+    const smallSize = 11;
+    const smallLH   = 15;
+
+    const fontFamily = 'DejaVuSans, sans-serif';
+    const useStroke = () => { outCtx.lineWidth = 0.8; outCtx.strokeStyle = 'rgba(0,0,0,0.25)'; };
+
+    // QR (Trilha)
     let qrImage = null;
-    let qrSize = 0, qrX = 0, qrY = 0;
     if (isTrilha && qrCodeData) {
-      try {
-        console.log('[FINAL ATTEMPT] Carregando QR Code...');
-        qrImage = await loadImage(qrCodeData);
-        qrSize = 130; // Tamanho fixo grande
-        qrX = outW - padding - qrSize;
-        qrY = (outH - qrSize) / 2;
-        console.log('[FINAL ATTEMPT] QR Code carregado.');
-      } catch(e) { console.error("[FINAL ATTEMPT] Erro ao carregar QR Code:", e.message); }
+      qrImage = await loadImage(qrCodeData);
     }
 
-    // 5. Processa cada Frame
-    console.log('[FINAL ATTEMPT] Iniciando processamento de frames...');
-    let frameCount = 0;
+    let prevFrame = null;
+
     for (const f of frames) {
-      frameCount++;
-      const delayMs = (f.frameInfo?.delay ?? 10) * 10;
-      encoder.setDelay(delayMs > 10 ? delayMs : 100);
+      // compõe frame de origem
+      handleDisposal(srcCtx, prevFrame);
+      blitFramePatch(srcCtx, f);
 
-      // Carrega o frame PNG
-      const frameBuf = await streamToBuffer(f.getImage());
-      const frameImg = await loadImage(frameBuf);
+      // fundo do cartão
+      outCtx.clearRect(0, 0, outW, outH);
+      outCtx.fillStyle = '#FFFFFF';
+      outCtx.fillRect(0, 0, outW, outH);
 
-      // Limpa e desenha fundo branco
-      ctx.clearRect(0, 0, outW, outH);
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, outW, outH);
+      // desenha logo animado na coluna esquerda
+      const logoImg = await loadImage(srcCanvas.toBuffer('image/png'));
+      drawContainNoUpscale(outCtx, logoImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
-      // Desenha Logo (Frame PNG original) na área esquerda
-      drawContainNoUpscale(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
+      // divisor azul
+      outCtx.fillStyle = '#005A9C';
+      outCtx.fillRect(dividerX, padding, 2, outH - padding * 2);
 
-      // Divisor Vertical (se não for Trilha)
-      if (!isTrilha) {
-        ctx.fillStyle = '#005A9C';
-        ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
-      }
-
-      // Desenha QR (se Trilha)
+      // área de texto (ajusta se tiver QR)
+      let textRight = outW - padding;
       if (isTrilha && qrImage) {
-        console.log(`[FINAL ATTEMPT Frame ${frameCount}] Desenhando QR...`);
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(qrX - 5, qrY - 5, qrSize + 10, qrSize + 10);
-        ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+        const qrSize = Math.min(110, outH - padding * 2);
+        const qrX = outW - padding - qrSize;
+        const qrY = Math.round((outH - qrSize) / 2);
+        outCtx.fillStyle = '#FFFFFF';
+        outCtx.fillRect(qrX - 6, qrY - 6, qrSize + 12, qrSize + 12);
+        outCtx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
+        textRight = qrX - 12;
       }
 
-      // --- DESENHO DE TEXTO SIMPLIFICADO (Como no r10 DIAG) ---
-      let currentY = 50;           // Posição Y inicial FIXA
-      const textLeftDiag = 280;    // Posição X inicial FIXA
-      const maxWDiag = 300;        // Largura máxima FIXA
-      const lineHDiag = 35;        // Altura linha FIXA
-      const nameSizeDiag = 28;     // Tamanho Nome FIXO
-      const subSizeDiag = 22;      // Tamanho Subtexto FIXO
-      ctx.fillStyle = '#000000'; // Preto FIXO
-      ctx.textBaseline = 'top';
-      ctx.textAlign = 'left';
+      const maxW = Math.max(40, textRight - textLeft);
+      let y = padding;
 
-      // Nome
-      try {
-          ctx.font = `bold ${nameSizeDiag}px sans-serif`;
-          console.log(`[FINAL ATTEMPT Frame ${frameCount}] Tentando desenhar Nome: ${name} em ${textLeftDiag},${currentY} (Fonte: ${ctx.font})`);
-          ctx.fillText(name, textLeftDiag, currentY, maxWDiag);
-          currentY += lineHDiag;
-      } catch (e) { console.error(`[FINAL ATTEMPT Frame ${frameCount}] Erro ao desenhar Nome:`, e.message); }
+      // NOME
+      outCtx.fillStyle = nameColor;
+      outCtx.textBaseline = 'top';
+      outCtx.font = `bold ${nameSize}px ${fontFamily}`;
+      useStroke();
+      y = drawWrapped(outCtx, name, textLeft, y, maxW, lineH) + 6;
 
-      // Cargo
-      try {
-          ctx.font = `${subSizeDiag}px sans-serif`;
-          console.log(`[FINAL ATTEMPT Frame ${frameCount}] Tentando desenhar Cargo: ${title} em ${textLeftDiag},${currentY} (Fonte: ${ctx.font})`);
-          ctx.fillText(title, textLeftDiag, currentY, maxWDiag);
-          currentY += lineHDiag;
-      } catch (e) { console.error(`[FINAL ATTEMPT Frame ${frameCount}] Erro ao desenhar Cargo:`, e.message); }
+      // DEPARTAMENTO (opcional)
+      if (department) {
+        outCtx.fillStyle = normalColor;
+        outCtx.font = `${subSize}px ${fontFamily}`;
+        useStroke();
+        y = drawWrapped(outCtx, department, textLeft, y, maxW, lineH);
+      }
 
-      // Telefone
-      try {
-          ctx.font = `bold ${subSizeDiag}px sans-serif`;
-          console.log(`[FINAL ATTEMPT Frame ${frameCount}] Tentando desenhar Telefone: ${phone} em ${textLeftDiag},${currentY} (Fonte: ${ctx.font})`);
-          ctx.fillText(phone, textLeftDiag, currentY, maxWDiag);
-      } catch (e) { console.error(`[FINAL ATTEMPT Frame ${frameCount}] Erro ao desenhar Telefone:`, e.message); }
-      // --- FIM DESENHO DE TEXTO SIMPLIFICADO ---
+      // CARGO
+      outCtx.fillStyle = normalColor;
+      outCtx.font = `${subSize}px ${fontFamily}`;
+      useStroke();
+      y = drawWrapped(outCtx, title, textLeft, y, maxW, lineH);
 
-      // Adiciona frame ao encoder
-      encoder.addFrame(ctx);
+      // TELEFONE
+      outCtx.fillStyle = normalColor;
+      outCtx.font = `bold ${boldSub}px ${fontFamily}`;
+      useStroke();
+      y = drawWrapped(outCtx, phone, textLeft, y + 2, maxW, lineH);
+
+      // EMAIL (opcional)
+      if (email) {
+        outCtx.fillStyle = normalColor;
+        outCtx.font = `${subSize}px ${fontFamily}`;
+        useStroke();
+        y = drawWrapped(outCtx, email, textLeft, y + 2, maxW, lineH);
+      }
+
+      // ENDEREÇO (opcional ou padrão)
+      if (address) {
+        outCtx.fillStyle = subtleColor;
+        outCtx.font = `${smallSize}px ${fontFamily}`;
+        useStroke();
+        drawWrapped(outCtx, address, textLeft, y + 6, maxW, smallLH);
+      }
+
+      // adiciona frame ao encoder
+      const delayMs = (f.delay || 10) * 10; // delay em ms (gifuct usa centésimos)
+      encoder.setDelay(delayMs);
+      encoder.addFrame(outCtx);
+
+      prevFrame = f;
     }
-    console.log(`[FINAL ATTEMPT] ${frameCount} frames processados.`);
 
-    // 6. Finaliza
-    console.log('[FINAL ATTEMPT] Finalizando GIF...');
     encoder.finish();
-    console.log('[FINAL ATTEMPT] Processamento concluído.');
-
+    console.log('[ASSINATURA] OK', BUILD);
   } catch (e) {
-    console.error('[FINAL ATTEMPT] ERRO GERAL:', e.message, e.stack);
+    console.error('[ASSINATURA] ERRO', e);
     if (!res.headersSent) {
-      res.status(500).send(`Erro interno (FINAL ATTEMPT). Detalhe: ${e.message}`);
-    } else {
-       console.error('[FINAL ATTEMPT] Erro após início do stream.');
-       if (!res.writableEnded) res.end();
+      res.status(500).send(`Erro interno ao processar o GIF. Detalhe: ${e.message}`);
     }
   }
 }
 
-// ---------- rotas ----------
-app.post('/generate-gif-signature', (req, res) => makeSignature(req, res, false));
-app.post('/generate-trilha-signature', (req, res) => makeSignature(req, res, true));
+// ----------------- rotas -----------------
+app.post('/generate-gif-signature', (req, res) => buildSignature(req, res, false));
+app.post('/generate-trilha-signature', (req, res) => buildSignature(req, res, true));
 
-// Root (vRAILWAY-FINAL-ATTEMPT) - Nova versão para prova
-app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-FINAL-ATTEMPT está no ar!`));
+app.get('/version', (_req, res) => res.json({ build: BUILD }));
+app.get('/', (_req, res) => res.send(`Servidor no ar | build=${BUILD}`));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT} | build=${BUILD}`);
