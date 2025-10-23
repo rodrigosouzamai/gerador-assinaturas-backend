@@ -1,4 +1,4 @@
-// --- SERVIDOR ASSINATURAS GIF — r8.1 (Layout Corrigido) ---
+// --- SERVIDOR ASSINATURAS GIF — r9 FINAL (Canvas Fixo, Layout Maior) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,7 +9,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 8080; // Railway define a porta via env
-const BUILD = '2025-10-23-r8.1';
+const BUILD = '2025-10-23-r9-FINAL'; // Nova versão de build
 
 const corsOptions = {
   origin: 'https://octopushelpdesk.com.br',
@@ -32,7 +32,6 @@ const streamToBuffer = (stream) =>
     stream.on('error', reject);
   });
 
-// Pega o primeiro valor não vazio de uma lista de chaves num objeto
 const pick = (obj, keys, fallback = '') => {
   for (const k of keys) {
     if (obj[k] !== undefined && obj[k] !== null) {
@@ -45,65 +44,56 @@ const pick = (obj, keys, fallback = '') => {
 
 // Desenha imagem dentro da caixa, mantendo proporção, sem aumentar (contain)
 function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
-  const imgW = img.width || 1; // Evita divisão por zero
+  const imgW = img.width || 1;
   const imgH = img.height || 1;
-  const s = Math.min(1, Math.min(boxW / imgW, boxH / imgH)); // Escala <= 1
+  if (boxW <= 0 || boxH <= 0 || imgW <= 0 || imgH <= 0) return; // Evita erros
+  const s = Math.min(1, Math.min(boxW / imgW, boxH / imgH));
   const dw = Math.round(imgW * s);
   const dh = Math.round(imgH * s);
   const dx = Math.round(boxX + (boxW - dw) / 2);
   const dy = Math.round(boxY + (boxH - dh) / 2);
 
-  // Desativa suavização para GIFs não ficarem borrados
-  const prevEnabled = ctx.imageSmoothingEnabled;
-  const prevQual = ctx.imageSmoothingQuality;
-  ctx.imageSmoothingEnabled = false;
-  ctx.imageSmoothingQuality = 'low';
-  ctx.drawImage(img, dx, dy, dw, dh);
-  ctx.imageSmoothingEnabled = prevEnabled;
-  ctx.imageSmoothingQuality = prevQual || 'high';
+  try {
+    const prevEnabled = ctx.imageSmoothingEnabled;
+    const prevQual = ctx.imageSmoothingQuality;
+    ctx.imageSmoothingEnabled = false; // Sem suavização para GIFs
+    ctx.imageSmoothingQuality = 'low';
+    ctx.drawImage(img, dx, dy, dw, dh);
+    ctx.imageSmoothingEnabled = prevEnabled;
+    ctx.imageSmoothingQuality = prevQual || 'high';
+  } catch (e) {
+      console.error("Erro em drawImage:", e.message);
+  }
 }
 
-// Desenha texto com wrap + fallback; usa fill e stroke para garantir visibilidade
-// Retorna a posição Y final
+// Desenha texto com wrap + stroke para visibilidade
 function drawTextSafe(ctx, text, x, y, maxW, lineH) {
-  if (!text || maxW <= 0) return y; // Não desenha se não houver texto ou espaço
+  if (!text || maxW <= 0) return y;
+  text = String(text); // Garante que é string
 
-  const tryWrap = () => {
-    const words = String(text).split(/\s+/);
+  try {
+    const words = text.split(/\s+/);
     let line = '';
     let currentY = y;
     for (let i = 0; i < words.length; i++) {
       const test = line ? `${line} ${words[i]}` : words[i];
-      // Verifica se o texto de teste excede a largura máxima
+      // Verifica se o texto excede a largura
       if (ctx.measureText(test).width > maxW && i > 0) {
-        ctx.fillText(line, x, currentY);
-        ctx.strokeText(line, x, currentY); // contorno fino
-        line = words[i]; // Começa nova linha com a palavra atual
-        currentY += lineH; // Move para a próxima linha
+        ctx.strokeText(line, x, currentY); // Desenha stroke primeiro
+        ctx.fillText(line, x, currentY);   // Desenha fill por cima
+        line = words[i];
+        currentY += lineH;
       } else {
-        line = test; // Continua na mesma linha
+        line = test;
       }
     }
-    // Desenha a última linha (ou única linha)
-    ctx.fillText(line, x, currentY);
+    // Desenha a última linha
     ctx.strokeText(line, x, currentY);
-    return currentY; // Retorna a posição Y da última linha desenhada
-  };
-
-  // Se a medição falhar ou der largura ~0, desenha sem wrap como fallback
-  try {
-      const m = ctx.measureText(String(text));
-      if (!m || !m.width || m.width < 0.1) {
-        ctx.fillText(String(text), x, y);
-        ctx.strokeText(String(text), x, y);
-        return y;
-      }
-      return tryWrap();
-  } catch(e) {
-      console.error("Erro em measureText/fillText:", e.message, "Texto:", text);
-      // Fallback muito simples se fillText falhar
-      try { ctx.fillText('?', x, y); } catch {}
-      return y;
+    ctx.fillText(line, x, currentY);
+    return currentY; // Retorna Y da linha base da última linha desenhada
+  } catch (e) {
+    console.error("Erro em drawTextSafe:", e.message, "Texto:", text);
+    return y; // Retorna Y original em caso de erro
   }
 }
 
@@ -111,21 +101,24 @@ function drawTextSafe(ctx, text, x, y, maxW, lineH) {
 async function makeSignature(req, res, isTrilha) {
   const body = req.body || {};
 
-  // Extrai dados do payload
+  // Extrai dados
   const name   = pick(body, ['name', 'nome'], 'Seu Nome');
   const title  = pick(body, ['title', 'cargo'], 'Seu Cargo');
   const phone  = pick(body, ['phone', 'telefone'], 'Seu Telefone');
   const gifUrl = pick(body, ['gifUrl', 'gif_url', 'gif']);
-  const department = pick(body, ['department', 'departamento'], ''); // Pega departamento se enviado
+  const department = pick(body, ['department', 'departamento'], '');
   const address = pick(
-    body,
-    ['address', 'endereco', 'endereço'],
+    body, ['address', 'endereco', 'endereço'],
     'Setor SRPN - Estadio Mané Garrincha Raio 46/47 Cep: 70070-701 - Camarote Vip 09. Brasilia - DF. Brasil'
   );
-  const email = pick(body, ['email', 'e-mail'], ''); // Pega email se enviado
-  const qrCodeData = body.qrCodeData; // Para Trilha
+  const email = pick(body, ['email', 'e-mail'], '');
+  const qrCodeData = body.qrCodeData;
 
-  // Validações básicas
+  // Tamanho de Saída Fixo (como era na versão r8)
+  const outW = 635;
+  const outH = 215;
+
+  // Validações
   if (!gifUrl || !name || !title || !phone) {
     return res.status(400).send('Erro: envie name, title, phone e gifUrl.');
   }
@@ -134,7 +127,7 @@ async function makeSignature(req, res, isTrilha) {
   }
 
   const short = (s) => (s ? String(s).slice(0, 80) : s);
-  console.log('[REQ]', { build: BUILD, trilha: isTrilha, name: short(name), title: short(title), gifUrl: short(gifUrl) });
+  console.log('[REQ]', { build: BUILD, trilha: isTrilha, name: short(name), gifUrl: short(gifUrl) });
 
   try {
     // 1. Baixa GIF
@@ -146,46 +139,38 @@ async function makeSignature(req, res, isTrilha) {
     const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
 
-    // 3. Determina Dimensões Reais
-    const firstBuf = await streamToBuffer(frames[0].getImage());
-    const firstImg = await loadImage(firstBuf);
-    const width = firstImg.width;   // <-- USA LARGURA REAL
-    const height = firstImg.height; // <-- USA ALTURA REAL
-    if (width <= 0 || height <= 0) throw new Error('Dimensões inválidas do GIF.');
-    console.log(`[ASSINATURA] Dimensões reais: ${width}x${height}`);
-
-    // 4. Configura Encoder e Resposta
+    // 3. Configura Encoder e Resposta
     res.setHeader('Content-Type', 'image/gif');
-    const encoder = new GifEncoder(width, height, 'neuquant', true); // <-- Usa dimensões reais
+    const encoder = new GifEncoder(outW, outH, 'neuquant', true); // Usa tamanho fixo
     encoder.createReadStream().pipe(res);
     encoder.start();
     encoder.setRepeat(0);
-    encoder.setQuality(10); // Qualidade ajustada (1-30)
+    encoder.setQuality(10); // Qualidade ajustada
 
-    const canvas = createCanvas(width, height); // <-- Usa dimensões reais
+    const canvas = createCanvas(outW, outH); // Usa tamanho fixo
     const ctx = canvas.getContext('2d');
 
-    // 5. Layout Adaptativo (Calculado com base em width/height reais)
-    const padding = Math.max(10, Math.min(20, width * 0.03)); // Padding proporcional
-    const leftColW = width * 0.40; // Logo ocupa 40%
+    // 4. Layout Fixo (Ajustado para 635x215)
+    const padding = 20; // Maior padding
+    const leftColW = 240; // Largura maior para logo
     const dividerX = leftColW;
-    const textLeft = dividerX + Math.max(10, width * 0.02); // Espaço após divisor
-    let textAreaRight = width - padding; // Limite direito base
+    const textLeft = dividerX + 20; // Espaço maior após divisor
+    let textAreaRight = outW - padding;
 
-    // Fontes Adaptativas (baseado na altura)
-    const nameSize  = Math.max(14, Math.min(20, height * 0.08)); // Nome ~8% da altura
-    const subSize   = Math.max(11, Math.min(16, height * 0.065)); // Subtexto ~6.5%
-    const boldSub   = subSize;
-    const lineH     = subSize * 1.4; // Espaço entre linhas
-    const smallSize = Math.max(9, Math.min(12, height * 0.05)); // Endereço ~5%
-    const smallLH   = smallSize * 1.3;
+    // Fontes Maiores (Fixas)
+    const nameSize  = 22;
+    const subSize   = 18;
+    const boldSub   = 18;
+    const lineH     = 25; // Espaço maior entre linhas
+    const smallSize = 14;
+    const smallLH   = 18;
 
     // Cores e Stroke
     const nameColor   = isTrilha ? '#0E2923' : '#003366';
     const normalColor = isTrilha ? '#0E2923' : '#555555';
     const subtleColor = '#777777';
-    const strokeStyle = 'rgba(0,0,0,0.15)'; // Stroke mais sutil
-    const setupStroke = () => { ctx.lineWidth = 0.5; ctx.strokeStyle = strokeStyle; };
+    const strokeStyle = 'rgba(0,0,0,0.1)'; // Stroke bem sutil
+    const setupStroke = () => { ctx.lineWidth = 0.4; ctx.strokeStyle = strokeStyle; };
 
     // QR Code (Trilha)
     let qrImage = null;
@@ -193,20 +178,17 @@ async function makeSignature(req, res, isTrilha) {
     if (isTrilha && qrCodeData) {
       try {
         qrImage = await loadImage(qrCodeData);
-        qrSize = Math.min(height * 0.8, width * 0.25, 110); // QR adaptativo, max 110px
-        qrSize = Math.max(50, qrSize); // Mínimo 50px
-        qrX = width - padding - qrSize;
-        qrY = (height - qrSize) / 2; // Centraliza verticalmente
-        textAreaRight = qrX - Math.max(10, width * 0.02); // Ajusta limite direito do texto
-      } catch(e) {
-        console.error("Erro ao carregar QR Code:", e.message);
-        // Continua sem QR code se falhar
-      }
+        qrSize = Math.min(outH * 0.75, 130); // QR adaptado à altura, max 130px
+        qrSize = Math.max(80, qrSize);     // Mínimo 80px
+        qrX = outW - padding - qrSize;
+        qrY = (outH - qrSize) / 2;         // Centraliza verticalmente
+        textAreaRight = qrX - 20;          // Ajusta limite direito do texto
+      } catch(e) { console.error("Erro ao carregar QR Code:", e.message); }
     }
 
-    const maxTextWidth = Math.max(40, textAreaRight - textLeft); // Largura máxima do texto
+    const maxTextWidth = Math.max(50, textAreaRight - textLeft); // Largura máxima do texto
 
-    // 6. Processa cada Frame
+    // 5. Processa cada Frame
     for (const f of frames) {
       const delayMs = (f.frameInfo?.delay ?? 10) * 10;
       encoder.setDelay(delayMs > 10 ? delayMs : 100);
@@ -214,32 +196,29 @@ async function makeSignature(req, res, isTrilha) {
       const frameBuf = await streamToBuffer(f.getImage());
       const frameImg = await loadImage(frameBuf);
 
-      // Limpa e desenha fundo (branco) e frame do GIF
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = '#FFFFFF'; // Garante fundo branco se GIF for transparente
-      ctx.fillRect(0, 0, width, height);
-      ctx.drawImage(frameImg, 0, 0, width, height); // Desenha frame original
+      // Limpa e desenha fundo (branco)
+      ctx.clearRect(0, 0, outW, outH);
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, outW, outH);
 
-      // Desenha Logo (na área esquerda)
-      // drawContainNoUpscale(ctx, frameImg, padding, padding, leftColW - padding * 2, height - padding * 2);
-      // O frame já é o logo nesta versão
+      // Desenha Logo (Frame do GIF original) na área esquerda
+      drawContainNoUpscale(ctx, frameImg, padding, padding, leftColW - padding * 2, outH - padding * 2);
 
       // Divisor Vertical (se não for Trilha)
       if (!isTrilha) {
         ctx.fillStyle = '#005A9C'; // Cor do divisor
-        ctx.fillRect(dividerX, padding, 2, height - padding * 2);
+        ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
       }
 
       // Desenha QR (se Trilha)
       if (isTrilha && qrImage) {
-        // Fundo branco atrás do QR
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(qrX - 4, qrY - 4, qrSize + 8, qrSize + 8);
+        ctx.fillStyle = '#FFFFFF'; // Fundo branco atrás do QR
+        ctx.fillRect(qrX - 5, qrY - 5, qrSize + 10, qrSize + 10);
         ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
       }
 
       // Desenha Textos
-      let currentY = padding + 5; // Começa perto do topo
+      let currentY = padding + 10; // Começa um pouco abaixo do topo
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
 
@@ -247,34 +226,40 @@ async function makeSignature(req, res, isTrilha) {
       ctx.fillStyle = nameColor;
       ctx.font = `bold ${nameSize}px sans-serif`;
       setupStroke();
-      currentY = drawTextSafe(ctx, name, textLeft, currentY, maxTextWidth, lineH) + Math.max(4, height*0.015); // Espaço pós-nome
+      // Ajuste para drawTextSafe retornar a posição Y da linha BASE do texto desenhado
+      let lastY = drawTextSafe(ctx, name, textLeft, currentY, maxTextWidth, lineH);
+      currentY = lastY + lineH + 6; // Próxima linha = Y da linha base + altura da linha + espaço
 
       // Departamento (se houver e não for Trilha)
       if (department && !isTrilha) {
         ctx.fillStyle = normalColor;
         ctx.font = `${subSize}px sans-serif`;
         setupStroke();
-        currentY = drawTextSafe(ctx, department, textLeft, currentY, maxTextWidth, lineH);
+        lastY = drawTextSafe(ctx, department, textLeft, currentY, maxTextWidth, lineH);
+        currentY = lastY + lineH; // Próxima linha
       }
 
       // Cargo
       ctx.fillStyle = normalColor;
       ctx.font = `${subSize}px sans-serif`;
       setupStroke();
-      currentY = drawTextSafe(ctx, title, textLeft, currentY, maxTextWidth, lineH);
+      lastY = drawTextSafe(ctx, title, textLeft, currentY, maxTextWidth, lineH);
+      currentY = lastY + lineH; // Próxima linha
 
       // Telefone
       ctx.fillStyle = normalColor;
       ctx.font = `bold ${boldSub}px sans-serif`;
       setupStroke();
-      currentY = drawTextSafe(ctx, phone, textLeft, currentY + Math.max(2, height*0.005), maxTextWidth, lineH);
+      lastY = drawTextSafe(ctx, phone, textLeft, currentY + 3, maxTextWidth, lineH); // Adiciona espaço antes
+      currentY = lastY + lineH; // Próxima linha
 
       // Email (se houver)
       if (email) {
         ctx.fillStyle = normalColor;
         ctx.font = `${subSize}px sans-serif`;
         setupStroke();
-        currentY = drawTextSafe(ctx, email, textLeft, currentY + Math.max(2, height*0.005), maxTextWidth, lineH);
+        lastY = drawTextSafe(ctx, email, textLeft, currentY + 3, maxTextWidth, lineH); // Adiciona espaço antes
+        currentY = lastY + lineH; // Próxima linha
       }
 
       // Endereço (se houver e não for Trilha)
@@ -282,14 +267,15 @@ async function makeSignature(req, res, isTrilha) {
         ctx.fillStyle = subtleColor;
         ctx.font = `${smallSize}px sans-serif`;
         setupStroke();
-        drawTextSafe(ctx, address, textLeft, currentY + Math.max(6, height*0.02), maxTextWidth, smallLH);
+        // Desenha no espaço restante
+        drawTextSafe(ctx, address, textLeft, currentY + 8, maxTextWidth, smallLH);
       }
 
       // Adiciona frame ao encoder
       encoder.addFrame(ctx);
     }
 
-    // 7. Finaliza
+    // 6. Finaliza
     encoder.finish();
     console.log('[ASSINATURA] OK', BUILD);
   } catch (e) {
@@ -298,10 +284,7 @@ async function makeSignature(req, res, isTrilha) {
       res.status(500).send(`Erro interno ao processar o GIF. Detalhe: ${e.message}`);
     } else {
        console.error('Erro após início do stream; resposta pode estar incompleta.');
-        // Tenta fechar o stream se ainda estiver aberto
-       if (!res.writableEnded) {
-           res.end(); // Força o fechamento
-       }
+       if (!res.writableEnded) res.end(); // Força o fechamento
     }
   }
 }
@@ -311,8 +294,8 @@ app.post('/generate-gif-signature', (req, res) => makeSignature(req, res, false)
 app.post('/generate-trilha-signature', (req, res) => makeSignature(req, res, true));
 
 app.get('/version', (_req, res) => res.json({ build: BUILD }));
-// Root (vRAILWAY-LAYOUT-R8.1) - Nova versão para prova
-app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-LAYOUT-R8.1 está no ar!`));
+// Root (vRAILWAY-LAYOUT-R9) - Nova versão para prova
+app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-LAYOUT-R9 está no ar!`));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT} | build=${BUILD}`);
