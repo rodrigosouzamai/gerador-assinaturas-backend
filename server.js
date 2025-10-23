@@ -1,4 +1,4 @@
-// --- SERVIDOR ASSINATURAS GIF — r9 FINAL (Canvas Fixo, Layout Maior) ---
+// --- SERVIDOR ASSINATURAS GIF — r10 DIAG (Diagnóstico de Desenho) ---
 
 const express = require('express');
 const { createCanvas, loadImage } = require('@napi-rs/canvas');
@@ -9,7 +9,7 @@ const fetch = require('node-fetch');
 
 const app = express();
 const PORT = process.env.PORT || 8080; // Railway define a porta via env
-const BUILD = '2025-10-23-r9-FINAL'; // Nova versão de build
+const BUILD = '2025-10-23-r10-DIAG'; // Nova versão de build
 
 const corsOptions = {
   origin: 'https://octopushelpdesk.com.br',
@@ -42,59 +42,20 @@ const pick = (obj, keys, fallback = '') => {
   return fallback;
 };
 
-// Desenha imagem dentro da caixa, mantendo proporção, sem aumentar (contain)
 function drawContainNoUpscale(ctx, img, boxX, boxY, boxW, boxH) {
   const imgW = img.width || 1;
   const imgH = img.height || 1;
-  if (boxW <= 0 || boxH <= 0 || imgW <= 0 || imgH <= 0) return; // Evita erros
+  if (boxW <= 0 || boxH <= 0 || imgW <= 0 || imgH <= 0) return;
   const s = Math.min(1, Math.min(boxW / imgW, boxH / imgH));
   const dw = Math.round(imgW * s);
   const dh = Math.round(imgH * s);
   const dx = Math.round(boxX + (boxW - dw) / 2);
   const dy = Math.round(boxY + (boxH - dh) / 2);
-
   try {
-    const prevEnabled = ctx.imageSmoothingEnabled;
-    const prevQual = ctx.imageSmoothingQuality;
-    ctx.imageSmoothingEnabled = false; // Sem suavização para GIFs
+    ctx.imageSmoothingEnabled = false;
     ctx.imageSmoothingQuality = 'low';
     ctx.drawImage(img, dx, dy, dw, dh);
-    ctx.imageSmoothingEnabled = prevEnabled;
-    ctx.imageSmoothingQuality = prevQual || 'high';
-  } catch (e) {
-      console.error("Erro em drawImage:", e.message);
-  }
-}
-
-// Desenha texto com wrap + stroke para visibilidade
-function drawTextSafe(ctx, text, x, y, maxW, lineH) {
-  if (!text || maxW <= 0) return y;
-  text = String(text); // Garante que é string
-
-  try {
-    const words = text.split(/\s+/);
-    let line = '';
-    let currentY = y;
-    for (let i = 0; i < words.length; i++) {
-      const test = line ? `${line} ${words[i]}` : words[i];
-      // Verifica se o texto excede a largura
-      if (ctx.measureText(test).width > maxW && i > 0) {
-        ctx.strokeText(line, x, currentY); // Desenha stroke primeiro
-        ctx.fillText(line, x, currentY);   // Desenha fill por cima
-        line = words[i];
-        currentY += lineH;
-      } else {
-        line = test;
-      }
-    }
-    // Desenha a última linha
-    ctx.strokeText(line, x, currentY);
-    ctx.fillText(line, x, currentY);
-    return currentY; // Retorna Y da linha base da última linha desenhada
-  } catch (e) {
-    console.error("Erro em drawTextSafe:", e.message, "Texto:", text);
-    return y; // Retorna Y original em caso de erro
-  }
+  } catch (e) { console.error("Erro em drawImage:", e.message); }
 }
 
 // ---------- Lógica Principal ----------
@@ -102,19 +63,14 @@ async function makeSignature(req, res, isTrilha) {
   const body = req.body || {};
 
   // Extrai dados
-  const name   = pick(body, ['name', 'nome'], 'Seu Nome');
-  const title  = pick(body, ['title', 'cargo'], 'Seu Cargo');
-  const phone  = pick(body, ['phone', 'telefone'], 'Seu Telefone');
+  const name   = pick(body, ['name', 'nome'], 'Nome Teste'); // Fallback mais visível
+  const title  = pick(body, ['title', 'cargo'], 'Cargo Teste');
+  const phone  = pick(body, ['phone', 'telefone'], '(00) 00000-0000');
   const gifUrl = pick(body, ['gifUrl', 'gif_url', 'gif']);
-  const department = pick(body, ['department', 'departamento'], '');
-  const address = pick(
-    body, ['address', 'endereco', 'endereço'],
-    'Setor SRPN - Estadio Mané Garrincha Raio 46/47 Cep: 70070-701 - Camarote Vip 09. Brasilia - DF. Brasil'
-  );
-  const email = pick(body, ['email', 'e-mail'], '');
+  // Ignora department, address, email por agora para simplificar
   const qrCodeData = body.qrCodeData;
 
-  // Tamanho de Saída Fixo (como era na versão r8)
+  // Tamanho de Saída Fixo
   const outW = 635;
   const outH = 215;
 
@@ -127,69 +83,71 @@ async function makeSignature(req, res, isTrilha) {
   }
 
   const short = (s) => (s ? String(s).slice(0, 80) : s);
-  console.log('[REQ]', { build: BUILD, trilha: isTrilha, name: short(name), gifUrl: short(gifUrl) });
+  console.log('[REQ DIAG]', { build: BUILD, trilha: isTrilha, name: short(name), gifUrl: short(gifUrl) });
 
   try {
     // 1. Baixa GIF
+    console.log('[DIAG] Baixando GIF...');
     const r = await fetch(gifUrl);
     if (!r.ok) throw new Error(`Falha ao buscar GIF (${r.status} ${r.statusText})`);
     const gifBuffer = await r.buffer();
+    console.log('[DIAG] GIF baixado.');
 
     // 2. Extrai Frames (como PNG)
+    console.log('[DIAG] Extraindo frames...');
     const frames = await gifFrames({ url: gifBuffer, frames: 'all', outputType: 'png' });
     if (!frames || frames.length === 0) throw new Error('Nenhum frame encontrado no GIF.');
+    console.log(`[DIAG] ${frames.length} frames extraídos.`);
 
     // 3. Configura Encoder e Resposta
     res.setHeader('Content-Type', 'image/gif');
-    const encoder = new GifEncoder(outW, outH, 'neuquant', true); // Usa tamanho fixo
+    const encoder = new GifEncoder(outW, outH, 'neuquant', true);
     encoder.createReadStream().pipe(res);
     encoder.start();
     encoder.setRepeat(0);
-    encoder.setQuality(10); // Qualidade ajustada
+    encoder.setQuality(10);
 
-    const canvas = createCanvas(outW, outH); // Usa tamanho fixo
+    const canvas = createCanvas(outW, outH);
     const ctx = canvas.getContext('2d');
+    console.log('[DIAG] Canvas e Encoder configurados.');
 
-    // 4. Layout Fixo (Ajustado para 635x215)
-    const padding = 20; // Maior padding
-    const leftColW = 240; // Largura maior para logo
+    // 4. Layout Fixo Simplificado (Ajustado para 635x215)
+    const padding = 20;
+    const leftColW = 240;
     const dividerX = leftColW;
-    const textLeft = dividerX + 20; // Espaço maior após divisor
+    const textLeft = dividerX + 30; // Posição X inicial do texto (mais para a direita)
     let textAreaRight = outW - padding;
 
-    // Fontes Maiores (Fixas)
-    const nameSize  = 22;
-    const subSize   = 18;
-    const boldSub   = 18;
-    const lineH     = 25; // Espaço maior entre linhas
-    const smallSize = 14;
-    const smallLH   = 18;
+    // Fontes Grandes Fixas
+    const nameSize  = 30; // Bem grande
+    const subSize   = 24; // Grande
+    const lineH     = 35; // Espaço grande
 
-    // Cores e Stroke
-    const nameColor   = isTrilha ? '#0E2923' : '#003366';
-    const normalColor = isTrilha ? '#0E2923' : '#555555';
-    const subtleColor = '#777777';
-    const strokeStyle = 'rgba(0,0,0,0.1)'; // Stroke bem sutil
-    const setupStroke = () => { ctx.lineWidth = 0.4; ctx.strokeStyle = strokeStyle; };
+    // Cores Contraste
+    const textColor = '#000000'; // Preto para garantir visibilidade
 
     // QR Code (Trilha)
     let qrImage = null;
     let qrSize = 0, qrX = 0, qrY = 0;
     if (isTrilha && qrCodeData) {
       try {
+        console.log('[DIAG] Carregando QR Code...');
         qrImage = await loadImage(qrCodeData);
-        qrSize = Math.min(outH * 0.75, 130); // QR adaptado à altura, max 130px
-        qrSize = Math.max(80, qrSize);     // Mínimo 80px
+        qrSize = 130; // Tamanho fixo grande
         qrX = outW - padding - qrSize;
-        qrY = (outH - qrSize) / 2;         // Centraliza verticalmente
-        textAreaRight = qrX - 20;          // Ajusta limite direito do texto
-      } catch(e) { console.error("Erro ao carregar QR Code:", e.message); }
+        qrY = (outH - qrSize) / 2;
+        textAreaRight = qrX - 20;
+        console.log('[DIAG] QR Code carregado.');
+      } catch(e) { console.error("[DIAG] Erro ao carregar QR Code:", e.message); }
     }
 
-    const maxTextWidth = Math.max(50, textAreaRight - textLeft); // Largura máxima do texto
+    const maxTextWidth = Math.max(50, textAreaRight - textLeft);
 
     // 5. Processa cada Frame
+    console.log('[DIAG] Iniciando processamento de frames...');
+    let frameCount = 0;
     for (const f of frames) {
+      frameCount++;
       const delayMs = (f.frameInfo?.delay ?? 10) * 10;
       encoder.setDelay(delayMs > 10 ? delayMs : 100);
 
@@ -206,85 +164,65 @@ async function makeSignature(req, res, isTrilha) {
 
       // Divisor Vertical (se não for Trilha)
       if (!isTrilha) {
-        ctx.fillStyle = '#005A9C'; // Cor do divisor
+        ctx.fillStyle = '#005A9C';
         ctx.fillRect(dividerX, padding, 2, outH - padding * 2);
       }
 
       // Desenha QR (se Trilha)
       if (isTrilha && qrImage) {
-        ctx.fillStyle = '#FFFFFF'; // Fundo branco atrás do QR
+        console.log(`[DIAG Frame ${frameCount}] Desenhando QR...`);
+        ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(qrX - 5, qrY - 5, qrSize + 10, qrSize + 10);
         ctx.drawImage(qrImage, qrX, qrY, qrSize, qrSize);
       }
 
-      // Desenha Textos
-      let currentY = padding + 10; // Começa um pouco abaixo do topo
+      // --- DESENHO DE TEXTO SIMPLIFICADO ---
+      let currentY = 50; // Começa fixo em Y=50
+      ctx.fillStyle = textColor;
       ctx.textBaseline = 'top';
       ctx.textAlign = 'left';
 
       // Nome
-      ctx.fillStyle = nameColor;
-      ctx.font = `bold ${nameSize}px sans-serif`;
-      setupStroke();
-      // Ajuste para drawTextSafe retornar a posição Y da linha BASE do texto desenhado
-      let lastY = drawTextSafe(ctx, name, textLeft, currentY, maxTextWidth, lineH);
-      currentY = lastY + lineH + 6; // Próxima linha = Y da linha base + altura da linha + espaço
-
-      // Departamento (se houver e não for Trilha)
-      if (department && !isTrilha) {
-        ctx.fillStyle = normalColor;
-        ctx.font = `${subSize}px sans-serif`;
-        setupStroke();
-        lastY = drawTextSafe(ctx, department, textLeft, currentY, maxTextWidth, lineH);
-        currentY = lastY + lineH; // Próxima linha
-      }
+      try {
+          ctx.font = `bold ${nameSize}px sans-serif`;
+          console.log(`[DIAG Frame ${frameCount}] Desenhando Nome: ${name} em ${textLeft},${currentY} (Fonte: ${ctx.font})`);
+          ctx.fillText(name, textLeft, currentY, maxTextWidth);
+          currentY += lineH; // Próxima linha
+      } catch (e) { console.error(`[DIAG Frame ${frameCount}] Erro ao desenhar Nome:`, e.message); }
 
       // Cargo
-      ctx.fillStyle = normalColor;
-      ctx.font = `${subSize}px sans-serif`;
-      setupStroke();
-      lastY = drawTextSafe(ctx, title, textLeft, currentY, maxTextWidth, lineH);
-      currentY = lastY + lineH; // Próxima linha
+      try {
+          ctx.font = `${subSize}px sans-serif`;
+          console.log(`[DIAG Frame ${frameCount}] Desenhando Cargo: ${title} em ${textLeft},${currentY} (Fonte: ${ctx.font})`);
+          ctx.fillText(title, textLeft, currentY, maxTextWidth);
+          currentY += lineH; // Próxima linha
+      } catch (e) { console.error(`[DIAG Frame ${frameCount}] Erro ao desenhar Cargo:`, e.message); }
 
       // Telefone
-      ctx.fillStyle = normalColor;
-      ctx.font = `bold ${boldSub}px sans-serif`;
-      setupStroke();
-      lastY = drawTextSafe(ctx, phone, textLeft, currentY + 3, maxTextWidth, lineH); // Adiciona espaço antes
-      currentY = lastY + lineH; // Próxima linha
-
-      // Email (se houver)
-      if (email) {
-        ctx.fillStyle = normalColor;
-        ctx.font = `${subSize}px sans-serif`;
-        setupStroke();
-        lastY = drawTextSafe(ctx, email, textLeft, currentY + 3, maxTextWidth, lineH); // Adiciona espaço antes
-        currentY = lastY + lineH; // Próxima linha
-      }
-
-      // Endereço (se houver e não for Trilha)
-      if (address && !isTrilha) {
-        ctx.fillStyle = subtleColor;
-        ctx.font = `${smallSize}px sans-serif`;
-        setupStroke();
-        // Desenha no espaço restante
-        drawTextSafe(ctx, address, textLeft, currentY + 8, maxTextWidth, smallLH);
-      }
+      try {
+          ctx.font = `bold ${subSize}px sans-serif`;
+          console.log(`[DIAG Frame ${frameCount}] Desenhando Telefone: ${phone} em ${textLeft},${currentY} (Fonte: ${ctx.font})`);
+          ctx.fillText(phone, textLeft, currentY, maxTextWidth);
+      } catch (e) { console.error(`[DIAG Frame ${frameCount}] Erro ao desenhar Telefone:`, e.message); }
+      // --- FIM DESENHO DE TEXTO SIMPLIFICADO ---
 
       // Adiciona frame ao encoder
       encoder.addFrame(ctx);
     }
+    console.log(`[DIAG] ${frameCount} frames processados.`);
 
     // 6. Finaliza
+    console.log('[DIAG] Finalizando GIF...');
     encoder.finish();
-    console.log('[ASSINATURA] OK', BUILD);
+    console.log('[DIAG] Processamento concluído.');
+
   } catch (e) {
-    console.error('[ASSINATURA] ERRO:', e.message, e.stack);
+    console.error('[DIAG] ERRO GERAL:', e.message, e.stack);
     if (!res.headersSent) {
-      res.status(500).send(`Erro interno ao processar o GIF. Detalhe: ${e.message}`);
+      res.status(500).send(`Erro interno (DIAG). Detalhe: ${e.message}`);
     } else {
-       console.error('Erro após início do stream; resposta pode estar incompleta.');
-       if (!res.writableEnded) res.end(); // Força o fechamento
+       console.error('[DIAG] Erro após início do stream.');
+       if (!res.writableEnded) res.end();
     }
   }
 }
@@ -294,8 +232,8 @@ app.post('/generate-gif-signature', (req, res) => makeSignature(req, res, false)
 app.post('/generate-trilha-signature', (req, res) => makeSignature(req, res, true));
 
 app.get('/version', (_req, res) => res.json({ build: BUILD }));
-// Root (vRAILWAY-LAYOUT-R9) - Nova versão para prova
-app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-LAYOUT-R9 está no ar!`));
+// Root (vRAILWAY-DRAWDIAG) - Nova versão para prova
+app.get('/', (_req, res) => res.send(`PROVA: Servidor vRAILWAY-DRAWDIAG está no ar!`));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Servidor rodando na porta ${PORT} | build=${BUILD}`);
