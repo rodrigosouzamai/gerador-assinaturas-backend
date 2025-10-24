@@ -2,7 +2,6 @@
 builder = "NIXPACKS"
 
 [phases.setup]
-# Pacotes necessários p/ @napi-rs/canvas e fontes
 aptPkgs = [
   "fonts-dejavu-core",
   "libjpeg-dev",
@@ -12,10 +11,6 @@ aptPkgs = [
   "libfreetype6",
   "libc6"
 ]
-
-[variables]
-# (opcional) fixe a versão do Node se quiser
-# NIXPACKS_NODE_VERSION = "20"
 
 [start]
 cmd = "node server.js"
